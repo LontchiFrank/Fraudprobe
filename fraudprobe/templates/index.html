@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>fraudprobe — adversarial resilience dashboard</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #171d2b; --panel-2: #1e2637; --line: #2a3346;
+    --ink: #e8ecf4; --muted: #97a3b8; --accent: #5b9dff; --good: #3ecf8e;
+    --warn: #f5a524; --bad: #f2555a; --bar: #5b9dff;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; overflow-x: hidden; } /* safety net: no single element can force page-wide horizontal scroll */
+  body { background: var(--bg); color: var(--ink); font-family: var(--sans);
+         line-height: 1.5; -webkit-font-smoothing: antialiased; }
+  header { padding: 28px 32px 20px; border-bottom: 1px solid var(--line);
+           display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  h1 .probe { color: var(--accent); }
+  .tag { font-size: 12px; color: var(--muted); flex: 1 1 auto; }
+  .btn-ghost { margin: 0; width: auto; background: transparent; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; font-size: 13px;
+    font-weight: 600; cursor: pointer; white-space: nowrap; }
+  .btn-ghost:hover { color: var(--ink); border-color: var(--accent); }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 24px 32px 80px; }
+  /* min-width:0 undoes the CSS Grid default where a grid container's automatic
+     minimum width is its content's min-content size — without it, a grid can grow
+     wider than its own parent instead of shrinking to fit on narrow screens. */
+  .grid { display: grid; gap: 18px; min-width: 0; }
+  .cols-2 { grid-template-columns: 320px 1fr; }
+  @media (max-width: 860px) { .cols-2 { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+          padding: 20px; min-width: 0; } /* grid items also default to min-width:auto — see note above */
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
+             color: var(--muted); margin: 0 0 14px; font-weight: 600; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 5px; }
+  select, input[type=number] { width: 100%; background: var(--panel-2); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 14px; }
+  .chk { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 14px; color: var(--ink); }
+  .chk input { accent-color: var(--accent); }
+  button { margin-top: 18px; width: 100%; background: var(--accent); color: #06122b;
+    border: 0; border-radius: 9px; padding: 11px; font-size: 15px; font-weight: 650;
+    cursor: pointer; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; min-width: 0; }
+  @media (max-width: 720px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+  .tile { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .tile .k { font-size: 12px; color: var(--muted); }
+  .tile .v { font-size: 28px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .v.good { color: var(--good); } .v.bad { color: var(--bad); } .v.warn { color: var(--warn); }
+  .barrow { display: grid; grid-template-columns: 180px 1fr 64px; align-items: center;
+            gap: 12px; margin: 9px 0; font-size: 14px; min-width: 0; }
+  .barrow .name { font-family: var(--mono); font-size: 13px; }
+  .track { background: var(--panel-2); border-radius: 6px; height: 20px; overflow: hidden; }
+  .fill { height: 100%; background: var(--bar); border-radius: 6px; }
+  .barrow .pct { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line);
+           font-variant-numeric: tabular-nums; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  td.mono, .mono { font-family: var(--mono); }
+  .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600; }
+  .pill.evaded { background: rgba(242,85,90,.15); color: var(--bad); }
+  .pill.caught { background: rgba(62,207,142,.15); color: var(--good); }
+  .lever { display: grid; grid-template-columns: 200px 1fr; align-items: center; gap: 12px; margin: 8px 0; min-width: 0; }
+  .lever .name { font-family: var(--mono); font-size: 13px; }
+  .dualbar { position: relative; height: 22px; background: var(--panel-2); border-radius: 6px; }
+  .dualbar .seg { position: absolute; top: 0; bottom: 0; border-radius: 6px; }
+  .seg.clean { background: rgba(91,157,255,.5); }
+  .seg.adv { background: var(--warn); }
+  .log { font-family: var(--mono); font-size: 12px; color: var(--muted); background: #0b0f18;
+         border: 1px solid var(--line); border-radius: 8px; padding: 12px; max-height: 180px;
+         overflow: auto; white-space: pre-wrap; }
+  .muted { color: var(--muted); }
+  .note { font-size: 12px; color: var(--muted); margin-top: 10px; }
+  .spinner { display: inline-block; width: 13px; height: 13px; border: 2px solid var(--line);
+             border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite;
+             vertical-align: middle; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .hidden { display: none; }
+  .verdict { background: var(--panel-2); border-left: 3px solid var(--bad); padding: 12px 16px;
+             border-radius: 8px; font-size: 14px; margin-top: 12px; }
+  .legend { font-size: 12px; color: var(--muted); margin-top: 10px; display: flex; gap: 16px; }
+  .legend .sw { display: inline-block; width: 11px; height: 11px; border-radius: 3px; vertical-align: middle; margin-right: 5px; }
+  .compare-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; min-width: 0; }
+  @media (max-width: 900px) { .compare-cols { grid-template-columns: 1fr; } }
+  .variant-col { display: grid; gap: 18px; min-width: 0; }
+  .variant-title { display: inline-flex; align-items: center; gap: 8px; font-size: 13px;
+    font-weight: 700; letter-spacing: .02em; margin-bottom: 4px; }
+  .variant-title .dot { width: 9px; height: 9px; border-radius: 50%; }
+  .variant-title.rules .dot { background: var(--accent); }
+  .variant-title.llm .dot { background: #c084fc; }
+  .tiles.tiles-2 { grid-template-columns: repeat(2, 1fr); }
+  .diff-note { font-size: 12px; margin-top: 4px; }
+  .diff-note.better { color: var(--good); } .diff-note.worse { color: var(--bad); }
+
+  #helpPanel h3 { font-size: 13px; color: var(--ink); margin: 18px 0 8px; }
+  #helpPanel h3:first-of-type { margin-top: 4px; }
+  #helpPanel p { font-size: 14px; color: var(--muted); margin: 0 0 8px; }
+  #helpPanel ol.help-steps, #helpPanel ul.help-list { margin: 0; padding-left: 20px; font-size: 14px; }
+  #helpPanel ol.help-steps > li, #helpPanel ul.help-list > li { margin-bottom: 10px; color: var(--ink); }
+  #helpPanel ul { margin: 6px 0; padding-left: 18px; font-size: 13px; color: var(--muted); }
+  #helpPanel ul li { margin-bottom: 4px; }
+  #helpPanel i { color: var(--ink); font-style: normal; font-weight: 600; }
+
+  /* ---- Tablet / phone ---- */
+  @media (max-width: 640px) {
+    .wrap { padding: 16px 14px 60px; }
+    header { padding: 18px 14px 16px; gap: 6px; }
+    h1 { font-size: 18px; }
+    .grid { gap: 14px; }
+    .card { padding: 14px; border-radius: 10px; }
+    .tiles { gap: 10px; }
+    .tile { padding: 12px; }
+    .tile .k { font-size: 11px; }
+    .tile .v { font-size: 21px; }
+    .verdict { font-size: 13px; padding: 10px 12px; }
+    select, input[type=number] { font-size: 16px; } /* prevent iOS auto-zoom on focus */
+    button { font-size: 16px; }
+    /* Stack the ranking rows: label+pct on one line, bar on the next. */
+    .barrow { grid-template-columns: 1fr auto; grid-template-areas: "name pct" "track track";
+              row-gap: 6px; column-gap: 8px; margin: 12px 0; }
+    .barrow .name { grid-area: name; }
+    .barrow .pct { grid-area: pct; }
+    .barrow .track { grid-area: track; }
+    /* Stack SHAP lever label above its bar instead of a fixed-width side label. */
+    .lever { grid-template-columns: 1fr; row-gap: 6px; margin: 12px 0; }
+  }
+  @media (max-width: 400px) {
+    .tiles { grid-template-columns: repeat(2, 1fr); } /* stay 2-up even under the 720px tile breakpoint */
+    .tile .v { font-size: 19px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="probe">fraud</span>probe</h1>
+  <span class="tag">adversarial resilience dashboard — can your fraud detector be fooled by AI?</span>
+  <button id="helpToggle" class="btn-ghost" type="button" aria-expanded="false">How this works ▾</button>
+</header>
+
+<div class="wrap grid cols-2">
+  <div id="helpPanel" class="card hidden" style="grid-column: 1 / -1;">
+    <h2>How fraudprobe works</h2>
+    <p>A fraud model can look excellent on paper — 95%+ accuracy — yet have never faced an
+      <i>adaptive</i> attacker. fraudprobe simulates one cheaply, using either simple math rules or a
+      local LLM, and measures how much of that accuracy actually survives.</p>
+
+    <h3>The pipeline</h3>
+    <ol class="help-steps">
+      <li><b>Baseline</b> — trains a classifier (XGBoost / Random Forest / GBDT) on transaction data
+        and measures clean-conditions performance: F1, PR-AUC, recall on held-out fraud.</li>
+      <li><b>Seed selection</b> — pulls the frauds the model catches with ≥95% confidence from the
+        held-out set. These are the "obvious" frauds — the ones you'd assume are safely caught.</li>
+      <li><b>Adversary</b> — mutates each seed fraud so it moves the same money but looks less
+        suspicious, using one or more strategies:
+        <ul>
+          <li><span class="mono">amount_split</span> — breaks one large transfer into several
+            smaller ones summing to the same total.</li>
+          <li><span class="mono">temporal_dispersion</span> — shifts the transaction to a less
+            suspicious hour.</li>
+          <li><span class="mono">balance_camouflage</span> — leaves a small residual balance instead
+            of draining the account to exactly zero (a strong fraud signal in this data).</li>
+        </ul>
+        Two backends generate these: <b>rules</b> (deterministic, instant) or <b>llm</b> (a local
+        llama3 model does the same job in natural language — slower, and every output still has to
+        pass an economic-validity check before being accepted).</li>
+      <li><b>Stress test</b> — rescoring the mutated corpus with the same baseline model and comparing
+        detection: clean vs. adversarial, the point-drop in recall, and which strategy evaded most.</li>
+      <li><b>Explain (SHAP)</b> — for each feature, how much it pushed the model toward "fraud" on the
+        original catches vs. the mutated versions. The biggest drops are the levers the attacker
+        pulled.</li>
+    </ol>
+
+    <h3>How to read the results</h3>
+    <ul class="help-list">
+      <li><b>Headline tiles</b> — <i>Clean detection</i> is real recall on obvious fraud;
+        <i>Adversarial detection</i> is recall after mutation. <i>Detection drop-off</i> is the
+        percentage-point gap — the number that matters most. A large drop means the model leans on
+        signals that are trivially game-able.</li>
+      <li><b>Weakness ranking</b> — which mutation strategy evaded most, worst first. If
+        <span class="mono">amount_split</span> dominates, the model over-relies on absolute
+        transaction size rather than behavioural pattern.</li>
+      <li><b>SHAP evasion levers</b> — blue is a feature's fraud-pushing signal on the original
+        fraud; orange is the same feature after mutation. A feature whose orange bar collapses toward
+        zero is a signal the attacker successfully neutralised — literally <i>why</i> the model got
+        fooled, not just <i>that</i> it did.</li>
+      <li><b>Sample evading transactions</b> — concrete rows with the model's real fraud score. A row
+        scored <span class="mono">0.000</span> and marked "evaded" is a real fraud the model was
+        fully confident was legitimate.</li>
+      <li><b>Compare mode's head-to-head strip</b> — states which backend evaded more. With very few
+        seed frauds, results get noisy (e.g. a single seed can flip the outcome); use a seed count of
+        20–30+ before trusting a comparison verdict.</li>
+    </ul>
+  </div>
+
+  <!-- Controls -->
+  <div class="card" style="align-self:start;">
+    <h2>Run a probe</h2>
+    <label for="model_type">Baseline model</label>
+    <select id="model_type">
+      <option value="auto">auto (XGBoost if available)</option>
+      <option value="xgboost">xgboost</option>
+      <option value="rf">random forest</option>
+      <option value="gbdt">gradient boosting</option>
+    </select>
+
+    <label for="backend">Adversary backend</label>
+    <select id="backend">
+      <option value="rules">rules — deterministic mutations</option>
+      <option value="llm">llm — local Ollama model</option>
+    </select>
+
+    <label for="llm_model">LLM model (llm backend)</label>
+    <select id="llm_model">
+      <option value="llama3">llama3</option>
+    </select>
+
+    <div class="chk" style="margin-top:12px;"><input type="checkbox" id="compare">
+      <label for="compare" style="margin:0;color:var(--ink)">Compare rules vs LLM side-by-side</label></div>
+    <div class="note" id="compareNote">Trains one model, attacks it with both backends, so only the
+      mutation strategy differs between the two columns.</div>
+
+    <label>Mutation strategies</label>
+    <div id="strategies">
+      {% for s in strategies %}
+      <div class="chk"><input type="checkbox" id="strat_{{s}}" value="{{s}}" checked>
+        <label for="strat_{{s}}" style="margin:0;color:var(--ink)">{{s}}</label></div>
+      {% endfor %}
+    </div>
+
+    <label for="demo_rows">Synthetic rows</label>
+    <input type="number" id="demo_rows" value="60000" min="5000" step="5000" />
+
+    <label for="max_seeds">Max seed frauds (bounds LLM calls — each takes seconds)</label>
+    <input type="number" id="max_seeds" value="20" min="1" step="1" />
+
+    <div class="chk" style="margin-top:12px;"><input type="checkbox" id="explain" checked>
+      <label for="explain" style="margin:0;color:var(--ink)">Explain evasion with SHAP</label></div>
+
+    <button id="runBtn">Run probe</button>
+    <div class="note" id="statusNote"></div>
+  </div>
+
+  <!-- Results -->
+  <div class="grid" style="gap:18px;">
+    <div class="card" id="logCard">
+      <h2>Activity</h2>
+      <div class="log" id="log">Configure a run on the left and press <b>Run probe</b>.</div>
+    </div>
+
+    <div id="compareSummary" class="card hidden"></div>
+    <div id="resultsContainer" class="hidden"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const pct = (x) => (x * 100).toFixed(1) + "%";
+let polling = null;
+
+$("compare").addEventListener("change", () => {
+  const on = $("compare").checked;
+  $("backend").disabled = on;
+  $("compareNote").style.display = on ? "block" : "none";
+});
+$("compareNote").style.display = "none";
+
+// Help panel: default open on a visitor's first-ever visit, then remember their choice.
+(function initHelp() {
+  const KEY = "fp_help_open";
+  const stored = localStorage.getItem(KEY);
+  const open = stored === null ? true : stored === "1";
+  setHelp(open);
+  $("helpToggle").addEventListener("click", () => setHelp($("helpPanel").classList.contains("hidden")));
+  function setHelp(open) {
+    $("helpPanel").classList.toggle("hidden", !open);
+    $("helpToggle").setAttribute("aria-expanded", String(open));
+    $("helpToggle").textContent = open ? "How this works ▴" : "How this works ▾";
+    localStorage.setItem(KEY, open ? "1" : "0");
+  }
+})();
+
+$("runBtn").addEventListener("click", async () => {
+  const strategies = [...document.querySelectorAll("#strategies input:checked")].map(e => e.value);
+  if (strategies.length === 0) { alert("Pick at least one strategy."); return; }
+  const body = {
+    model_type: $("model_type").value,
+    backend: $("backend").value,
+    llm_model: $("llm_model").value,
+    strategies,
+    demo_rows: parseInt($("demo_rows").value, 10),
+    max_seeds: parseInt($("max_seeds").value, 10),
+    explain: $("explain").checked,
+    compare: $("compare").checked,
+  };
+  $("runBtn").disabled = true;
+  $("resultsContainer").classList.add("hidden");
+  $("compareSummary").classList.add("hidden");
+  $("log").textContent = "Starting…";
+  $("statusNote").innerHTML = '<span class="spinner"></span> running…'
+    + (body.compare ? ' (runs the llm backend too — this can take a while on CPU)' : '');
+  const r = await fetch("/api/run", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  if (!r.ok) {
+    const e = await r.json(); $("statusNote").textContent = e.error || "failed";
+    $("runBtn").disabled = false; return;
+  }
+  if (polling) clearInterval(polling);
+  polling = setInterval(poll, 900);
+});
+
+async function poll() {
+  const r = await fetch("/api/status");
+  const s = await r.json();
+  if (s.log && s.log.length) $("log").textContent = s.log.join("\n");
+  if (s.status === "done") {
+    clearInterval(polling); polling = null;
+    $("runBtn").disabled = false;
+    $("statusNote").textContent = "done ✓";
+    renderResult(s.result);
+  } else if (s.status === "error") {
+    clearInterval(polling); polling = null;
+    $("runBtn").disabled = false;
+    $("statusNote").textContent = "error";
+    $("log").textContent = s.error;
+  }
+}
+
+// On load, show the most recent completed run (if any) so a refresh keeps context.
+(async function initial() {
+  try {
+    const s = await (await fetch("/api/status")).json();
+    if (s.status === "done" && s.result) {
+      $("statusNote").textContent = "showing last run";
+      if (s.log && s.log.length) $("log").textContent = s.log.join("\n");
+      renderResult(s.result);
+    } else if (s.status === "running") {
+      $("runBtn").disabled = true;
+      $("statusNote").innerHTML = '<span class="spinner"></span> running…';
+      if (polling) clearInterval(polling);
+      polling = setInterval(poll, 900);
+    }
+  } catch (e) { /* server just started; ignore */ }
+})();
+
+function renderResult(res) {
+  if (res.mode === "compare") renderCompare(res); else renderSingle(res);
+}
+
+// ---- shared card template, filled via data-f attributes scoped to `root` ----
+function cardsTemplate() {
+  return `
+    <div class="card">
+      <h2>Headline</h2>
+      <div class="tiles">
+        <div class="tile"><div class="k">Baseline F1</div><div class="v" data-f="t_f1">–</div></div>
+        <div class="tile"><div class="k">Clean detection</div><div class="v good" data-f="t_clean">–</div></div>
+        <div class="tile"><div class="k">Adversarial detection</div><div class="v bad" data-f="t_adv">–</div></div>
+        <div class="tile"><div class="k">Detection drop-off</div><div class="v warn" data-f="t_drop">–</div></div>
+      </div>
+      <div class="verdict" data-f="verdict"></div>
+      <div class="note" data-f="meta"></div>
+    </div>
+    <div class="card">
+      <h2>Weakness ranking — which trick fooled the model most</h2>
+      <div data-f="ranking"></div>
+    </div>
+    <div class="card" data-f="shapCard">
+      <h2>Why it evaded — SHAP evasion levers</h2>
+      <p class="muted" style="font-size:13px;margin-top:-6px;">
+        How much each feature's <b>fraud-pushing signal</b> dropped when the attacker mutated the
+        transaction. Bigger drop = a lever the attacker pulled to look legitimate.</p>
+      <div data-f="levers"></div>
+      <div class="legend">
+        <span><span class="sw" style="background:rgba(91,157,255,.5)"></span>clean fraud signal</span>
+        <span><span class="sw" style="background:var(--warn)"></span>after mutation</span>
+      </div>
+      <div class="note" data-f="shapNote"></div>
+    </div>
+    <div class="card">
+      <h2>Sample evading transactions</h2>
+      <p class="muted" style="font-size:13px;margin-top:-6px;">Real frauds (isFraud=1) the model scored as safe.</p>
+      <div class="tablewrap">
+        <table><thead><tr>
+          <th>strategy</th><th>type</th><th>amount</th><th>old bal. orig</th>
+          <th>new bal. orig</th><th>fraud score</th><th>outcome</th>
+        </tr></thead><tbody data-f="samplesBody"></tbody></table>
+      </div>
+    </div>`;
+}
+
+function fillVariant(root, res) {
+  const f = (name) => root.querySelector(`[data-f="${name}"]`);
+  const b = res.baseline, st = res.stress;
+  f("t_f1").textContent = b.f1.toFixed(3);
+  f("t_clean").textContent = pct(st.clean_fraud_detection_rate);
+  f("t_adv").textContent = pct(st.adversarial_detection_rate);
+  f("t_drop").textContent = (st.detection_drop_off * 100).toFixed(1) + " pts";
+
+  const rank = res.weakness_ranking || [];
+  if (rank.length) {
+    const worst = rank[0];
+    f("verdict").innerHTML = `<b>Verdict:</b> weakest against <span class="mono">${worst.strategy}</span> — `
+      + `${(worst.evasion_rate*100).toFixed(0)}% of those slipped through.`;
+  }
+  f("meta").textContent = `model: ${b.model_type} · data: ${res.data_source} · backend: ${res.backend}`
+    + (res.llm_model ? ` (${res.llm_model})` : "") + ` · seed: ${res.seed} · PR-AUC: ${(b.pr_auc||0).toFixed(3)}`;
+
+  const maxEv = Math.max(0.0001, ...rank.map(r => r.evasion_rate));
+  f("ranking").innerHTML = rank.map(r => `
+    <div class="barrow">
+      <span class="name">${r.strategy}</span>
+      <div class="track"><div class="fill" style="width:${(r.evasion_rate/maxEv*100).toFixed(1)}%"></div></div>
+      <span class="pct">${pct(r.evasion_rate)}</span>
+    </div>`).join("");
+
+  const exp = res.explanation;
+  if (exp && exp.available && exp.evasion_levers && exp.evasion_levers.length) {
+    const levers = exp.evasion_levers.filter(l => Math.abs(l.fraud_signal_drop) > 1e-6).slice(0, 8);
+    const scale = Math.max(...levers.map(l => Math.max(Math.abs(l.clean_mean_shap), Math.abs(l.adversarial_mean_shap))), 0.0001);
+    const half = 50;
+    const seg = (val) => {
+      const w = Math.min(Math.abs(val) / scale * half, half);
+      return val >= 0 ? `left:50%;width:${w}%;` : `right:50%;width:${w}%;`;
+    };
+    f("levers").innerHTML = levers.map(l => `
+      <div class="lever">
+        <span class="name">${l.feature}</span>
+        <div class="dualbar">
+          <div class="seg clean" style="${seg(l.clean_mean_shap)};opacity:.9;height:10px;top:1px;"></div>
+          <div class="seg adv" style="${seg(l.adversarial_mean_shap)};opacity:.95;height:10px;bottom:1px;"></div>
+        </div>
+      </div>`).join("");
+    f("shapNote").textContent = exp.note || "";
+  } else {
+    f("levers").innerHTML = "";
+    f("shapNote").textContent = (exp && exp.note) ? exp.note : "SHAP explanation unavailable.";
+  }
+
+  const rows = (res.sample_evasions || []).map(s => `
+    <tr>
+      <td class="mono">${s.mutation ?? ""}</td>
+      <td>${s.type ?? ""}</td>
+      <td>${(s.amount ?? 0).toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+      <td>${(s.oldbalanceOrg ?? 0).toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+      <td>${(s.newbalanceOrig ?? 0).toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+      <td>${(s.fraud_score ?? 0).toFixed(3)}</td>
+      <td>${s.flagged ? '<span class="pill caught">caught</span>' : '<span class="pill evaded">evaded</span>'}</td>
+    </tr>`).join("");
+  f("samplesBody").innerHTML = rows;
+}
+
+function renderSingle(res) {
+  $("compareSummary").classList.add("hidden");
+  const container = $("resultsContainer");
+  container.className = "grid";
+  container.innerHTML = cardsTemplate();
+  fillVariant(container, res);
+}
+
+function renderCompare(res) {
+  const variants = res.variants || [];
+  const container = $("resultsContainer");
+  container.className = "compare-cols";
+  container.innerHTML = variants.map(v => `
+    <div class="variant-col">
+      <div class="variant-title ${v.backend}">
+        <span class="dot"></span>${v.backend === "llm" ? `LLM (${v.llm_model})` : "Rules (deterministic)"}
+      </div>
+      ${cardsTemplate()}
+    </div>`).join("");
+
+  const cols = container.querySelectorAll(".variant-col");
+  variants.forEach((v, i) => fillVariant(cols[i], v));
+
+  // Head-to-head summary strip.
+  const summary = $("compareSummary");
+  if (variants.length === 2) {
+    const [a, b] = variants;
+    const evA = a.stress.evasion_rate, evB = b.stress.evasion_rate;
+    const worse = evA >= evB ? a : b, better = evA >= evB ? b : a;
+    const deltaPts = Math.abs(evA - evB) * 100;
+    summary.innerHTML = `<h2>Head-to-head</h2>
+      <div class="verdict">
+        <b>${worse.backend === "llm" ? `LLM (${worse.llm_model})` : "Rules"}</b> evaded detection more —
+        ${pct(worse.stress.evasion_rate)} vs ${pct(better.stress.evasion_rate)} for
+        <b>${better.backend === "llm" ? `LLM (${better.llm_model})` : "Rules"}</b>
+        (${deltaPts.toFixed(1)} pt gap). Same trained model, same seed frauds — only the
+        mutation method differs.
+      </div>`;
+    summary.classList.remove("hidden");
+  } else {
+    summary.classList.add("hidden");
+  }
+}
+</script>
+</body>
+</html>
