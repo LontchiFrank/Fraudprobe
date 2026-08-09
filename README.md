@@ -143,6 +143,22 @@ number in a report is measured, not assumed. So far:
   Tuning is on by default; pass `--no-tune` for the old fixed-hyperparameter, fast
   behaviour when iterating quickly (grid search adds ~15-20s for XGBoost/`auto` at
   demo scale, more for `rf`/`gbdt`, which are inherently slower per fit).
+- **Threshold sweep** — every run reports clean-vs-adversarial detection across a
+  full threshold grid, plus at thresholds pinned to realistic false-positive
+  budgets (0.1%/0.5%/1%) — a fixed 0.5 cutoff is a modelling convenience, not how
+  a real fraud team operates one, and evasion can look very different at a
+  better-chosen operating point.
+- **Statistics across seeds** — `--n-runs N` repeats the full pipeline across N
+  distinct seeds and writes `results_aggregate.json`: means with 95% CIs, a paired
+  test (t-test + Wilcoxon fallback, Cohen's d_z) of clean vs. adversarial
+  detection, and Wilson confidence intervals per strategy (flagged when the pooled
+  sample is small, never silently presented as precise).
+- **Rules vs. LLM at scale** — `--compare` attacks the *same* trained model and
+  *identical* seed frauds with both backends and reports a paired comparison:
+  mean evasion per backend, the difference with a 95% CI, and a significance test
+  — isolating what the LLM specifically contributes over a heuristic. LLM calls
+  run ~8-25s each depending on load; progress and an ETA are logged periodically,
+  and total/mean/min/max call latency land in `results.json`.
 
 ## Research context
 

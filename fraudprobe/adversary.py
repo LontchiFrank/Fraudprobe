@@ -14,6 +14,7 @@ to the corpus, so 'evasion' can never come from an impossible transaction.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -302,6 +303,12 @@ class AdversaryReport:
     min_value_retention: float = 0.90
     n_rejected_low_value: int = 0
     value_retention: dict[str, dict[str, float]] = field(default_factory=dict)
+    # LLM call timing (Task 10) — wall-clock cost is real at scale (~8-12s/call),
+    # so a large run needs this logged and recorded, not just a success rate.
+    llm_wall_clock_seconds: float = 0.0
+    llm_mean_call_seconds: float | None = None
+    llm_min_call_seconds: float | None = None
+    llm_max_call_seconds: float | None = None
 
 
 def generate_adversarial_corpus(
@@ -313,6 +320,7 @@ def generate_adversarial_corpus(
     require_llm: bool = False,
     validation: str = "strict",
     min_value_retention: float = 0.90,
+    log=lambda msg: None,
 ) -> tuple[pd.DataFrame, AdversaryReport]:
     """Produce the mutated corpus from a set of seed fraudulent rows.
 
@@ -338,6 +346,16 @@ def generate_adversarial_corpus(
     every group's retention ratio is still recorded in ``value_retention`` (mean,
     median, min, proportion within ±1% of 1.0, per strategy) regardless of whether
     it was kept, so the reported distribution is honest rather than survivor-biased.
+
+    Every generated row also carries a ``seed_idx`` column — the seed fraud's
+    positional index in ``seed_frauds`` — so a rules-vs-LLM comparison sharing the
+    same seed set (Task 10) can pair rows back to the specific underlying fraud
+    each backend mutated, not just compare aggregate rates.
+
+    ``log`` receives periodic progress lines during an LLM-backend run (every 10
+    calls) with the running mean call latency and an ETA — real wall-clock cost at
+    ~8-12s/call, so a large run needs visible progress, not a single number at the
+    end. Full timing summary statistics land on the returned report regardless.
     """
     rng = np.random.default_rng(seed)
     generated, rejected = [], 0
@@ -346,12 +364,22 @@ def generate_adversarial_corpus(
     rejection_reasons: dict[str, int] = {}
     n_rejected_low_value = 0
     retention_by_strategy: dict[str, list[float]] = {s: [] for s in strategies}
+    llm_call_latencies: list[float] = []
+    total_llm_calls_planned = len(seed_frauds) * len(strategies) if backend == "llm" else 0
 
-    for _, row in seed_frauds.iterrows():
+    for seed_idx, (_, row) in enumerate(seed_frauds.iterrows()):
         for strat in strategies:
             if backend == "llm":
                 n_llm_attempted += 1
+                t0 = time.perf_counter()
                 muts, used_llm, reason = _mutate_llm(row, rng, strat, llm_model)
+                llm_call_latencies.append(time.perf_counter() - t0)
+                if n_llm_attempted % 10 == 0 or n_llm_attempted == total_llm_calls_planned:
+                    mean_lat = sum(llm_call_latencies) / len(llm_call_latencies)
+                    remaining = total_llm_calls_planned - n_llm_attempted
+                    eta = remaining * mean_lat
+                    log(f"LLM call {n_llm_attempted}/{total_llm_calls_planned} "
+                        f"(mean {mean_lat:.1f}s/call, ETA {eta/60:.1f} min)")
                 if used_llm:
                     n_llm_success += 1
                     source = "llm"
@@ -376,6 +404,7 @@ def generate_adversarial_corpus(
                     m["isFraud"] = 1
                     m["mutation"] = strat
                     m["source"] = source
+                    m["seed_idx"] = seed_idx
                     valid_rows.append(m)
                 else:
                     rejected += 1
@@ -416,6 +445,12 @@ def generate_adversarial_corpus(
         }
 
     n_llm_fallback = sum(fallback_reasons.values())
+    if llm_call_latencies:
+        total_seconds = sum(llm_call_latencies)
+        log(f"LLM calls complete: {len(llm_call_latencies)} calls, "
+            f"{total_seconds:.1f}s total ({total_seconds/60:.1f} min), "
+            f"mean {total_seconds/len(llm_call_latencies):.1f}s/call.")
+
     report = AdversaryReport(
         n_seed=len(seed_frauds),
         n_generated=len(corpus),
@@ -433,5 +468,9 @@ def generate_adversarial_corpus(
         min_value_retention=min_value_retention,
         n_rejected_low_value=n_rejected_low_value,
         value_retention=value_retention,
+        llm_wall_clock_seconds=sum(llm_call_latencies),
+        llm_mean_call_seconds=(sum(llm_call_latencies) / len(llm_call_latencies)) if llm_call_latencies else None,
+        llm_min_call_seconds=min(llm_call_latencies) if llm_call_latencies else None,
+        llm_max_call_seconds=max(llm_call_latencies) if llm_call_latencies else None,
     )
     return corpus, report

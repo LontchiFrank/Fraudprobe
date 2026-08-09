@@ -160,6 +160,10 @@ def format_report(baseline: dict, stress: dict, adv_report) -> str:
                 f"{k}={v}" for k, v in sorted(adv_report.fallback_reasons.items(), key=lambda kv: -kv[1])
             )
             add(f"  Fallback reasons       : {reasons}")
+        if adv_report.llm_mean_call_seconds is not None:
+            add(f"  LLM call latency       : mean {adv_report.llm_mean_call_seconds:.1f}s, "
+                f"range [{adv_report.llm_min_call_seconds:.1f}s, {adv_report.llm_max_call_seconds:.1f}s], "
+                f"total {adv_report.llm_wall_clock_seconds/60:.1f} min")
     add("")
     add("-" * 62)
     add(f"  Clean fraud detection rate       : {stress['clean_fraud_detection_rate']*100:5.1f}%")

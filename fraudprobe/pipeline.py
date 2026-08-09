@@ -125,12 +125,54 @@ def run_probe(cfg: ProbeConfig) -> dict:
     return {k: v for k, v in result.items() if not k.startswith("_")}
 
 
+def _paired_backend_comparison(model: ScoredModel, corpora: dict[str, pd.DataFrame]) -> dict | None:
+    """Task 10: pair each backend's evasion by (seed_idx, mutation) — the same
+    underlying seed fraud, mutated by each backend — and test the difference.
+
+    Aggregate rate comparison ("rules evaded 55%, llm evaded 62%") can't tell you
+    whether that gap is real or noise from which seeds happened to be attacked.
+    Pairing by the shared seed set (guaranteed identical across backends — see
+    run_comparison) turns it into exactly the paired design paired_test expects.
+    Returns None if fewer than two backends produced a usable corpus.
+    """
+    usable = {b: df for b, df in corpora.items() if not df.empty and "seed_idx" in df.columns}
+    if len(usable) != 2:
+        return None
+    (a_name, a_df), (b_name, b_df) = usable.items()
+
+    def group_evasion(df: pd.DataFrame) -> pd.Series:
+        proba = model.score_rows(df)
+        flagged = pd.Series(proba >= model.threshold, index=df.index)
+        evaded = 1.0 - flagged.groupby([df["seed_idx"], df["mutation"]]).mean()
+        return evaded
+
+    a_evasion, b_evasion = group_evasion(a_df), group_evasion(b_df)
+    common = a_evasion.index.intersection(b_evasion.index)
+    if len(common) == 0:
+        return None
+
+    a_vals, b_vals = a_evasion.loc[common].to_numpy(), b_evasion.loc[common].to_numpy()
+    diff_stats = mean_std_ci95(b_vals - a_vals, bounds=(-1.0, 1.0))
+
+    return {
+        "backend_a": a_name,
+        "backend_b": b_name,
+        "n_paired_groups": int(len(common)),
+        "mean_evasion_a": float(np.mean(a_vals)),
+        "mean_evasion_b": float(np.mean(b_vals)),
+        "mean_difference_b_minus_a": diff_stats["mean"],
+        "difference_ci95": {"low": diff_stats["ci95_low"], "high": diff_stats["ci95_high"]},
+        "paired_test": paired_test(a_vals, b_vals),
+    }
+
+
 def run_comparison(cfg: ProbeConfig, backends=("rules", "llm")) -> dict:
     """Attack the SAME trained model + seed frauds with each backend, side by side.
 
     Training once and sharing the seed set is what makes the comparison fair: the
     only thing that differs between the columns is *how the transactions were
-    mutated* (deterministic rules vs a local LLM).
+    mutated* (deterministic rules vs a local LLM). See _paired_backend_comparison
+    for the statistical test this enables (Task 10).
     """
     outdir = Path(cfg.out) if cfg.out else None
     if outdir:
@@ -142,8 +184,10 @@ def run_comparison(cfg: ProbeConfig, backends=("rules", "llm")) -> dict:
               f"{data_stats['observed_fraud_rate']:.4%} ({data_stats['n_fraud']} fraud).")
     model, clean_test, baseline = _fit_baseline(cfg, df)
     clean_fraud, seed_frauds = _seed_frauds(cfg, model, clean_test)
+    cfg._emit(f"{len(seed_frauds)} seed frauds shared identically across all backends.")
 
     variants = []
+    corpora: dict[str, pd.DataFrame] = {}
     for backend in backends:
         cfg._emit(f"--- Attacking with backend='{backend}' ---")
         try:
@@ -154,6 +198,7 @@ def run_comparison(cfg: ProbeConfig, backends=("rules", "llm")) -> dict:
             continue
         if outdir and "_corpus" in v:
             v["_corpus"].to_csv(outdir / f"adversarial_corpus_{backend}.csv", index=False)
+        corpora[backend] = v["_corpus"]
         variants.append({
             "backend": backend,
             "llm_model": cfg.llm_model if backend == "llm" else None,
@@ -167,6 +212,15 @@ def run_comparison(cfg: ProbeConfig, backends=("rules", "llm")) -> dict:
     for w in warnings:
         cfg._emit(f"WARNING: {w}")
 
+    paired_comparison = _paired_backend_comparison(model, corpora)
+    if paired_comparison:
+        cfg._emit(f"Paired comparison ({paired_comparison['backend_a']} vs "
+                  f"{paired_comparison['backend_b']}, n={paired_comparison['n_paired_groups']} "
+                  f"shared seed+strategy groups): mean difference = "
+                  f"{paired_comparison['mean_difference_b_minus_a']:+.3f} "
+                  f"(95% CI [{paired_comparison['difference_ci95']['low']:+.3f}, "
+                  f"{paired_comparison['difference_ci95']['high']:+.3f}])")
+
     result = {
         "version": __version__,
         "mode": "compare",
@@ -176,6 +230,7 @@ def run_comparison(cfg: ProbeConfig, backends=("rules", "llm")) -> dict:
         "baseline": baseline,
         "warnings": warnings,
         "variants": variants,
+        "paired_backend_comparison": paired_comparison,
     }
     if outdir:
         write_json(result, outdir / "results.json")
@@ -357,6 +412,7 @@ def _attack_and_evaluate(cfg, model, clean_test, clean_fraud, seed_frauds, backe
         seed_frauds, strategies=strategies, backend=backend,
         llm_model=cfg.llm_model, seed=cfg.seed, require_llm=cfg.require_llm,
         validation=cfg.validation, min_value_retention=cfg.min_value_retention,
+        log=cfg._emit,
     )
     cfg._emit(f"{adv_report.n_generated} adversarial rows "
               f"({adv_report.n_rejected_invalid} rejected as economically invalid, "

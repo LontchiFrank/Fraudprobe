@@ -18,7 +18,7 @@ import argparse
 
 from . import __version__
 from .adversary import STRATEGIES, LLMRequiredError
-from .pipeline import ProbeConfig, run_probe, run_repeated
+from .pipeline import ProbeConfig, run_comparison, run_probe, run_repeated
 from .stats import format_aggregate_report
 
 
@@ -45,6 +45,34 @@ def cmd_run(args) -> int:
         log=lambda m: print(f"[fraudprobe] {m}"),
     )
     try:
+        if args.compare:
+            result = run_comparison(cfg)
+            for v in result["variants"]:
+                print("\n" + v["report_text"])
+            pc = result.get("paired_backend_comparison")
+            if pc:
+                print("\n" + "=" * 62)
+                print("  PAIRED COMPARISON (same seed frauds, same trained model)")
+                print("=" * 62)
+                print(f"  {pc['backend_a']} mean evasion : {pc['mean_evasion_a']*100:5.1f}%")
+                print(f"  {pc['backend_b']} mean evasion : {pc['mean_evasion_b']*100:5.1f}%")
+                print(f"  Difference ({pc['backend_b']} - {pc['backend_a']}): "
+                      f"{pc['mean_difference_b_minus_a']*100:+5.1f} pts  "
+                      f"(95% CI [{pc['difference_ci95']['low']*100:+.1f}, "
+                      f"{pc['difference_ci95']['high']*100:+.1f}], n={pc['n_paired_groups']} paired groups)")
+                sig = pc["paired_test"]
+                if sig.get("ttest"):
+                    print(f"  t-test p={sig['ttest']['p_value']:.4g}, "
+                          f"Cohen's d_z={sig['cohens_d_z']:+.3f}")
+                elif sig.get("note"):
+                    print(f"  {sig['note']}")
+                print("=" * 62)
+            else:
+                print("\n[fraudprobe] Not enough shared seed+strategy groups across backends "
+                      "for a paired comparison.")
+            if args.out:
+                print(f"\n[fraudprobe] Comparison artefacts written to {args.out}/")
+            return 0
         if args.n_runs > 1:
             result = run_repeated(cfg, n_runs=args.n_runs)
             print("\n" + format_aggregate_report(result) + "\n")
@@ -99,7 +127,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "tuning is ON) and use fixed hyperparameters for fast iteration.")
     r.add_argument("--save-model", type=str, default=None)
     r.add_argument("--backend", choices=["rules", "llm"], default="rules",
-                   help="'rules' = deterministic mutations; 'llm' = local Ollama model.")
+                   help="'rules' = deterministic mutations; 'llm' = local Ollama model. "
+                        "Ignored if --compare is set (runs both).")
+    r.add_argument("--compare", action="store_true",
+                   help="Attack the SAME trained model + seed frauds with both rules and llm "
+                        "backends and report a paired comparison (Task 10) — a statistical test "
+                        "of the difference in evasion rate, paired by the shared seed set. "
+                        "For a real comparison target --max-seeds 200+; each LLM call is "
+                        "~8-12s, so budget wall-clock time accordingly (see --llm-model).")
     r.add_argument("--llm-model", type=str, default="llama3")
     r.add_argument("--require-llm", action="store_true",
                    help="Abort instead of falling back to rules if any LLM mutation fails "
@@ -125,7 +160,8 @@ def build_parser() -> argparse.ArgumentParser:
                         "adversarial detection, and Wilson CIs per strategy. Default 1 "
                         "(single run); use 10 for reportable results. Individual runs' "
                         "artefacts are not written to disk, only the aggregate. Note this "
-                        "multiplies wall-clock time by n_runs, including SHAP if enabled.")
+                        "multiplies wall-clock time by n_runs, including SHAP if enabled. "
+                        "Ignored if --compare is set.")
     r.set_defaults(func=cmd_run)
 
     s = sub.add_parser("serve", help="Launch the web dashboard.")
