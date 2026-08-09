@@ -32,6 +32,7 @@ def cmd_run(args) -> int:
         backend=args.backend,
         llm_model=args.llm_model,
         require_llm=args.require_llm,
+        validation=args.validation,
         strategies=tuple(args.strategies) if args.strategies else STRATEGIES,
         max_seeds=args.max_seeds,
         out=args.out,
@@ -86,6 +87,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--require-llm", action="store_true",
                    help="Abort instead of falling back to rules if any LLM mutation fails "
                         "(guarantees a pure-LLM corpus for headline results).")
+    r.add_argument("--validation", choices=["lenient", "strict"], default="strict",
+                   help="'strict' (default) also requires balances to reconcile "
+                        "(newbalanceOrig ~= oldbalanceOrg - amount, etc.); "
+                        "'lenient' is fraudprobe's original signs-and-funds-only check.")
     r.add_argument("--strategies", nargs="*", choices=list(STRATEGIES), default=None)
     r.add_argument("--max-seeds", type=int, default=500)
     r.add_argument("--out", type=str, default="fraudprobe_out")

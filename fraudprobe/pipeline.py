@@ -32,6 +32,7 @@ class ProbeConfig:
     backend: str = "rules"              # rules | llm
     llm_model: str = "llama3"
     require_llm: bool = False           # raise instead of degrading on any rules fallback
+    validation: str = "strict"          # strict | lenient — see adversary.is_economically_valid
     strategies: tuple[str, ...] = STRATEGIES
     max_seeds: int = 500
     out: str | None = "fraudprobe_out"
@@ -205,9 +206,13 @@ def _attack_and_evaluate(cfg, model, clean_test, clean_fraud, seed_frauds, backe
     corpus, adv_report = generate_adversarial_corpus(
         seed_frauds, strategies=strategies, backend=backend,
         llm_model=cfg.llm_model, seed=cfg.seed, require_llm=cfg.require_llm,
+        validation=cfg.validation,
     )
     cfg._emit(f"{adv_report.n_generated} adversarial rows "
-              f"({adv_report.n_rejected_invalid} rejected as economically invalid).")
+              f"({adv_report.n_rejected_invalid} rejected as economically invalid, "
+              f"validation={adv_report.validation_mode}).")
+    if adv_report.rejection_reasons:
+        cfg._emit(f"Rejection reasons: {adv_report.rejection_reasons}")
     if adv_report.n_llm_attempted:
         rate = adv_report.llm_success_rate or 0.0
         cfg._emit(f"LLM success rate: {rate*100:.1f}% "

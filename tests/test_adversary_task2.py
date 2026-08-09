@@ -61,7 +61,8 @@ def test_split_amount_normalises_arbitrary_scale_weights(seed_frauds):
 def test_split_amount_all_rows_economically_valid(seed_frauds):
     row = _row(seed_frauds)
     frame = _split_amount(row, weights=[0.4, 0.35, 0.25])
-    assert all(is_economically_valid(r) for _, r in frame.iterrows())
+    results = [is_economically_valid(r) for _, r in frame.iterrows()]
+    assert all(valid for valid, _reason in results), results
 
 
 # --------------------------------------------------------------------------- #

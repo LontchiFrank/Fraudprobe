@@ -70,6 +70,7 @@ def create_app() -> Flask:
             backend=str(body.get("backend", "rules")),
             llm_model=str(body.get("llm_model", "llama3")),
             require_llm=bool(body.get("require_llm", False)),
+            validation=str(body.get("validation", "strict")),
             strategies=tuple(strategies),
             max_seeds=int(body.get("max_seeds", 500)),
             explain=bool(body.get("explain", True)),

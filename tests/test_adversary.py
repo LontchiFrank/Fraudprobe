@@ -187,4 +187,6 @@ def test_require_llm_passes_when_llm_always_succeeds(monkeypatch, seed_frauds):
 def test_is_economically_valid_rejects_negative_amount(seed_frauds):
     row = _row(seed_frauds).copy()
     row["amount"] = -1.0
-    assert not is_economically_valid(row)
+    valid, reason = is_economically_valid(row)
+    assert not valid
+    assert reason == "non_positive_amount"

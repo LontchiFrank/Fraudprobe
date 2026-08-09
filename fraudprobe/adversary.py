@@ -53,18 +53,50 @@ class LLMRequiredError(Exception):
 # --------------------------------------------------------------------------- #
 # Economic consistency validator
 # --------------------------------------------------------------------------- #
-def is_economically_valid(row: pd.Series, tol: float = 1.0) -> bool:
-    """A mutated row is admissible only if its arithmetic is physically possible."""
+# Reasons a mutated row can be rejected, in the order they are checked. Recorded
+# per-reason on AdversaryReport.rejection_reasons (Task 3) so "how much evasion
+# survives once impossible transactions are excluded" is an answerable question.
+REJECTION_REASONS = (
+    "non_positive_amount", "negative_balance", "insufficient_funds",
+    "orig_arithmetic", "dest_arithmetic",
+)
+VALIDATION_MODES = ("lenient", "strict")
+
+
+def is_economically_valid(row: pd.Series, tol: float = 1.0, mode: str = "strict") -> tuple[bool, str | None]:
+    """A mutated row is admissible only if its arithmetic is physically possible.
+
+    Returns ``(valid, reason)`` — ``reason`` is None when valid, else one of
+    ``REJECTION_REASONS``. Two validation modes:
+
+    - ``lenient`` (fraudprobe's original behaviour): checks signs and that the
+      origin can't spend more than it holds, but never checks that the resulting
+      balances actually reconcile.
+    - ``strict`` (default): additionally requires ``newbalanceOrig ≈ oldbalanceOrg
+      - amount`` and ``newbalanceDest ≈ oldbalanceDest + amount`` within ``tol``.
+      Without this, a mutation can leave the ledger self-contradictory — arithmetic
+      a real bank would reject at input validation, before any model ever runs —
+      and that non-reconciliation can itself push a classifier away from "fraud"
+      for reasons having nothing to do with the mutation strategy being tested.
+    """
+    if mode not in VALIDATION_MODES:
+        raise ValueError(f"Unknown validation mode: {mode!r} (expected one of {VALIDATION_MODES})")
+
     if row["amount"] <= 0:
-        return False
-    if row["oldbalanceOrg"] < 0 or row["newbalanceOrig"] < 0:
-        return False
-    if row["oldbalanceDest"] < 0 or row["newbalanceDest"] < 0:
-        return False
+        return False, "non_positive_amount"
+    if row["oldbalanceOrg"] < 0 or row["newbalanceOrig"] < 0 or row["oldbalanceDest"] < 0 or row["newbalanceDest"] < 0:
+        return False, "negative_balance"
     # Origin can't spend more than it holds.
     if row["amount"] > row["oldbalanceOrg"] + tol:
-        return False
-    return True
+        return False, "insufficient_funds"
+
+    if mode == "strict":
+        if abs(row["newbalanceOrig"] - (row["oldbalanceOrg"] - row["amount"])) > tol:
+            return False, "orig_arithmetic"
+        if abs(row["newbalanceDest"] - (row["oldbalanceDest"] + row["amount"])) > tol:
+            return False, "dest_arithmetic"
+
+    return True, None
 
 
 def total_value(rows: pd.DataFrame) -> float:
@@ -260,6 +292,9 @@ class AdversaryReport:
     n_llm_fallback: int = 0
     llm_success_rate: float | None = None
     fallback_reasons: dict[str, int] = field(default_factory=dict)
+    # Economic validation (Task 3).
+    validation_mode: str = "strict"
+    rejection_reasons: dict[str, int] = field(default_factory=dict)
 
 
 def generate_adversarial_corpus(
@@ -269,6 +304,7 @@ def generate_adversarial_corpus(
     llm_model: str = "llama3",
     seed: int = 42,
     require_llm: bool = False,
+    validation: str = "strict",
 ) -> tuple[pd.DataFrame, AdversaryReport]:
     """Produce the mutated corpus from a set of seed fraudulent rows.
 
@@ -281,11 +317,17 @@ def generate_adversarial_corpus(
     If ``require_llm`` is set and any mutation falls back to rules, raises
     ``LLMRequiredError`` immediately rather than degrading the corpus — for
     producing a headline result that is guaranteed pure-LLM.
+
+    ``validation`` is ``"strict"`` (default) or ``"lenient"`` — see
+    ``is_economically_valid``. Rejections are counted per reason on the returned
+    report so "how much evasion survives once impossible transactions are
+    excluded" is answerable from the artefacts alone.
     """
     rng = np.random.default_rng(seed)
     generated, rejected = [], 0
     n_llm_attempted = n_llm_success = 0
     fallback_reasons: dict[str, int] = {}
+    rejection_reasons: dict[str, int] = {}
 
     for _, row in seed_frauds.iterrows():
         for strat in strategies:
@@ -309,7 +351,8 @@ def generate_adversarial_corpus(
                 source = "rules"
 
             for _, m in muts.iterrows():
-                if is_economically_valid(m):
+                valid, why_not = is_economically_valid(m, mode=validation)
+                if valid:
                     m = m.copy()
                     m["isFraud"] = 1
                     m["mutation"] = strat
@@ -317,6 +360,7 @@ def generate_adversarial_corpus(
                     generated.append(m)
                 else:
                     rejected += 1
+                    rejection_reasons[why_not] = rejection_reasons.get(why_not, 0) + 1
 
     corpus = pd.DataFrame(generated).reset_index(drop=True) if generated else pd.DataFrame()
 
@@ -340,5 +384,7 @@ def generate_adversarial_corpus(
         n_llm_fallback=n_llm_fallback,
         llm_success_rate=(n_llm_success / n_llm_attempted) if n_llm_attempted else None,
         fallback_reasons=fallback_reasons,
+        validation_mode=validation,
+        rejection_reasons=rejection_reasons,
     )
     return corpus, report

@@ -79,8 +79,14 @@ def format_report(baseline: dict, stress: dict, adv_report) -> str:
     add(f"  Held-out fraud support : {baseline.get('support_fraud', 0)}")
     add("")
     add(f"  Adversarial corpus     : {adv_report.n_generated} rows "
-        f"({adv_report.backend} backend, {adv_report.n_rejected_invalid} rejected as invalid)")
+        f"({adv_report.backend} backend, {adv_report.n_rejected_invalid} rejected as invalid, "
+        f"validation={adv_report.validation_mode})")
     add(f"  Economic value check   : {'PASS' if adv_report.value_preserved else 'FAIL'}")
+    if adv_report.rejection_reasons:
+        reasons = ", ".join(
+            f"{k}={v}" for k, v in sorted(adv_report.rejection_reasons.items(), key=lambda kv: -kv[1])
+        )
+        add(f"  Rejection reasons      : {reasons}")
     if adv_report.n_llm_attempted:
         rate = adv_report.llm_success_rate or 0.0
         add(f"  LLM success rate       : {rate*100:5.1f}% "
