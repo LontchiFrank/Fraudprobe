@@ -7,17 +7,18 @@ dict and (optionally) writes the reproducibility artefacts to disk.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from . import __version__
-from .adversary import STRATEGIES, generate_adversarial_corpus
+from .adversary import STRATEGIES, LLMRequiredError, generate_adversarial_corpus
 from .data import load_paysim, make_demo_data
 from .explain import explain_evasion
 from .models import ScoredModel, train_baseline, write_json
+from .stats import mean_std_ci95, paired_test, wilson_ci
 from .stress import format_report, rank_weaknesses, stress_test
 
 
@@ -179,6 +180,94 @@ def run_comparison(cfg: ProbeConfig, backends=("rules", "llm")) -> dict:
     if outdir:
         write_json(result, outdir / "results.json")
         cfg._emit(f"Comparison artefacts written to {outdir}/")
+    return result
+
+
+def run_repeated(cfg: ProbeConfig, n_runs: int = 10) -> dict:
+    """Task 9: re-run the full single-backend pipeline across n_runs distinct
+    seeds (cfg.seed, cfg.seed+1, ..., cfg.seed+n_runs-1) and aggregate.
+
+    A single run at a fixed seed cannot support the paired significance test or
+    95% confidence intervals the methodology promises — this is what makes both
+    computable. Individual runs are not written to disk (their `out` is
+    suppressed); only the aggregate goes to results_aggregate.json.
+    """
+    outdir = Path(cfg.out) if cfg.out else None
+
+    per_run = []
+    for i in range(n_runs):
+        run_cfg = replace(cfg, seed=cfg.seed + i, out=None)
+        cfg._emit(f"--- Run {i + 1}/{n_runs} (seed={run_cfg.seed}) ---")
+        try:
+            per_run.append(run_probe(run_cfg))
+        except (RuntimeError, LLMRequiredError) as exc:
+            cfg._emit(f"Run {i + 1} (seed={run_cfg.seed}) failed, excluded from aggregate: {exc}")
+
+    if not per_run:
+        raise RuntimeError(f"All {n_runs} repeated runs failed; nothing to aggregate.")
+    if len(per_run) < n_runs:
+        cfg._emit(f"WARNING: only {len(per_run)}/{n_runs} runs succeeded; "
+                  f"statistics below are computed from the successful runs only.")
+
+    clean_rates = [r["stress"]["clean_fraud_detection_rate"] for r in per_run]
+    adv_rates = [r["stress"]["adversarial_detection_rate"] for r in per_run]
+
+    aggregate_metrics = {
+        "clean_fraud_detection_rate": mean_std_ci95(clean_rates, bounds=(0.0, 1.0)),
+        "adversarial_detection_rate": mean_std_ci95(adv_rates, bounds=(0.0, 1.0)),
+        "detection_drop_off": mean_std_ci95(
+            (r["stress"]["detection_drop_off"] for r in per_run), bounds=(-1.0, 1.0)
+        ),
+        "evasion_rate": mean_std_ci95((r["stress"]["evasion_rate"] for r in per_run), bounds=(0.0, 1.0)),
+        "baseline_f1": mean_std_ci95((r["baseline"]["f1"] for r in per_run), bounds=(0.0, 1.0)),
+    }
+
+    significance = paired_test(clean_rates, adv_rates)
+
+    # Per-strategy Wilson CIs, pooled across all successful runs — a single run's
+    # seed-limited corpus (often ~20 rows per strategy) makes for a wide interval
+    # on its own; pooling narrows it but does not always escape "wide" (flagged
+    # explicitly on each entry, never silently presented as precise).
+    pools: dict[str, dict[str, int]] = {}
+    for r in per_run:
+        for strat, s in r["stress"]["per_strategy"].items():
+            pool = pools.setdefault(strat, {"n": 0, "evaded": 0})
+            pool["n"] += s["n"]
+            pool["evaded"] += round(s["evasion_rate"] * s["n"])
+    per_strategy_wilson = {strat: wilson_ci(pool["evaded"], pool["n"]) for strat, pool in pools.items()}
+    for strat, w in per_strategy_wilson.items():
+        if w["wide"]:
+            cfg._emit(f"NOTE: per-strategy evasion CI for '{strat}' is wide (n={w['n']} pooled "
+                      f"observations, 95% CI [{w['ci95_low']:.2f}, {w['ci95_high']:.2f}]).")
+
+    result = {
+        "version": __version__,
+        "mode": "repeated",
+        "n_runs_requested": n_runs,
+        "n_runs_completed": len(per_run),
+        "base_seed": cfg.seed,
+        "seeds": [r["seed"] for r in per_run],
+        "backend": cfg.backend,
+        "llm_model": cfg.llm_model if cfg.backend == "llm" else None,
+        "aggregate_metrics": aggregate_metrics,
+        "paired_significance_clean_vs_adversarial": significance,
+        "per_strategy_wilson_ci": per_strategy_wilson,
+        "per_run_summary": [
+            {
+                "seed": r["seed"],
+                "clean_detection_rate": r["stress"]["clean_fraud_detection_rate"],
+                "adversarial_detection_rate": r["stress"]["adversarial_detection_rate"],
+                "evasion_rate": r["stress"]["evasion_rate"],
+            }
+            for r in per_run
+        ],
+    }
+
+    if outdir:
+        outdir.mkdir(parents=True, exist_ok=True)
+        write_json(result, outdir / "results_aggregate.json")
+        cfg._emit(f"Aggregate results written to {outdir}/results_aggregate.json")
+
     return result
 
 

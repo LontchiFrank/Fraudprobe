@@ -18,7 +18,8 @@ import argparse
 
 from . import __version__
 from .adversary import STRATEGIES, LLMRequiredError
-from .pipeline import ProbeConfig, run_probe
+from .pipeline import ProbeConfig, run_probe, run_repeated
+from .stats import format_aggregate_report
 
 
 def cmd_run(args) -> int:
@@ -44,6 +45,12 @@ def cmd_run(args) -> int:
         log=lambda m: print(f"[fraudprobe] {m}"),
     )
     try:
+        if args.n_runs > 1:
+            result = run_repeated(cfg, n_runs=args.n_runs)
+            print("\n" + format_aggregate_report(result) + "\n")
+            if args.out:
+                print(f"[fraudprobe] Aggregate written to {args.out}/results_aggregate.json")
+            return 0
         result = run_probe(cfg)
     except LLMRequiredError as exc:
         print(f"[fraudprobe] --require-llm violated: {exc}", flush=True)
@@ -111,6 +118,14 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--seed", type=int, default=42)
     r.add_argument("--no-explain", action="store_true",
                    help="Skip the SHAP evasion attribution.")
+    r.add_argument("--n-runs", type=int, default=1,
+                   help="Repeat the full pipeline across this many distinct seeds "
+                        "(seed, seed+1, ..., seed+n-1) and write results_aggregate.json "
+                        "with means, 95%% CIs, a paired significance test of clean vs. "
+                        "adversarial detection, and Wilson CIs per strategy. Default 1 "
+                        "(single run); use 10 for reportable results. Individual runs' "
+                        "artefacts are not written to disk, only the aggregate. Note this "
+                        "multiplies wall-clock time by n_runs, including SHAP if enabled.")
     r.set_defaults(func=cmd_run)
 
     s = sub.add_parser("serve", help="Launch the web dashboard.")
