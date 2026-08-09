@@ -21,6 +21,31 @@ RAW_COLUMNS = [
 
 TXN_TYPES = ["CASH_IN", "CASH_OUT", "DEBIT", "PAYMENT", "TRANSFER"]
 
+# Hour-of-day activity profiles for the synthetic fixture (Task 5). PaySim's `step`
+# is one simulated hour, so `step % 24` is hour-of-day. Documented assumption, not
+# a measured PaySim statistic: legitimate traffic follows realistic daytime/
+# business-hours activity, while fraud is weighted toward the early-morning hours
+# (00:00-05:00) when a stolen account is least likely to be watched. Without this,
+# hour_of_day carries no fraud signal at all, which would make any temporal-based
+# mutation strategy trivially evade for reasons that have nothing to do with the
+# mutation itself — a property of the fixture, not a finding about fraud detection.
+_LEGIT_HOURLY_WEIGHTS = np.array([
+    0.3, 0.2, 0.15, 0.15, 0.2, 0.4, 0.8, 1.5, 2.2, 2.6, 2.8, 2.9,
+    2.9, 2.8, 2.7, 2.6, 2.5, 2.4, 2.0, 1.6, 1.2, 0.9, 0.6, 0.4,
+])
+_FRAUD_HOURLY_WEIGHTS = np.array([
+    3.0, 3.2, 3.4, 3.5, 3.3, 2.8, 1.8, 1.0, 0.6, 0.5, 0.5, 0.5,
+    0.5, 0.5, 0.5, 0.5, 0.5, 0.6, 0.7, 0.9, 1.2, 1.6, 2.0, 2.6,
+])
+_SIM_DAYS = 31  # matches PaySim's ~744-hour (31-day) simulation window
+
+
+def _sample_steps(rng: np.random.Generator, n: int, hourly_weights: np.ndarray) -> np.ndarray:
+    """Sample `step` values (1..744) whose hour-of-day follows `hourly_weights`."""
+    days = rng.integers(0, _SIM_DAYS, size=n)
+    hours = rng.choice(24, size=n, p=hourly_weights / hourly_weights.sum())
+    return days * 24 + hours + 1
+
 
 def load_paysim(path: str) -> pd.DataFrame:
     """Load the real PaySim CSV (Lopez-Rojas & Axelsson, 2016) from disk."""
@@ -36,8 +61,10 @@ def make_demo_data(n_rows: int = 60_000, fraud_rate: float = 0.013, seed: int = 
 
     This is NOT a substitute for PaySim in research: it reproduces the schema and
     the headline structural regularities (fraud concentrated in TRANSFER/CASH_OUT,
-    origin account drained to ~0) so the pipeline is exercisable end to end.
-    Use --data with the real PaySim CSV for any result you intend to report.
+    origin account drained to ~0, fraud clustered in the 00:00-05:00 hours per the
+    documented assumption on _FRAUD_HOURLY_WEIGHTS above) so the pipeline is
+    exercisable end to end. Use --data with the real PaySim CSV for any result you
+    intend to report.
     """
     rng = np.random.default_rng(seed)
     n_fraud = max(1, int(n_rows * fraud_rate))
@@ -53,7 +80,7 @@ def make_demo_data(n_rows: int = 60_000, fraud_rate: float = 0.013, seed: int = 
 
     legit = pd.DataFrame(
         {
-            "step": rng.integers(1, 745, size=n_legit),
+            "step": _sample_steps(rng, n_legit, _LEGIT_HOURLY_WEIGHTS),
             "type": legit_type,
             "amount": legit_amount,
             "nameOrig": [f"C{i:09d}" for i in rng.integers(1e8, 9.9e8, size=n_legit)],
@@ -73,7 +100,7 @@ def make_demo_data(n_rows: int = 60_000, fraud_rate: float = 0.013, seed: int = 
 
     fraud = pd.DataFrame(
         {
-            "step": rng.integers(1, 745, size=n_fraud),
+            "step": _sample_steps(rng, n_fraud, _FRAUD_HOURLY_WEIGHTS),
             "type": rng.choice(["TRANSFER", "CASH_OUT"], size=n_fraud),
             "amount": fraud_amount,
             "nameOrig": [f"C{i:09d}" for i in rng.integers(1e8, 9.9e8, size=n_fraud)],

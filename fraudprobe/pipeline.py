@@ -92,6 +92,10 @@ def run_probe(cfg: ProbeConfig) -> dict:
     variant = _attack_and_evaluate(cfg, model, clean_test, clean_fraud, seed_frauds,
                                    cfg.backend, baseline)
 
+    warnings = _fixture_warnings(_resolve_strategies(cfg), data_source)
+    for w in warnings:
+        cfg._emit(f"WARNING: {w}")
+
     result = {
         "version": __version__,
         "mode": "single",
@@ -100,6 +104,7 @@ def run_probe(cfg: ProbeConfig) -> dict:
         "backend": cfg.backend,
         "llm_model": cfg.llm_model if cfg.backend == "llm" else None,
         "baseline": baseline,
+        "warnings": warnings,
         **variant,
     }
 
@@ -148,12 +153,17 @@ def run_comparison(cfg: ProbeConfig, backends=("rules", "llm")) -> dict:
             **{k: val for k, val in v.items() if not k.startswith("_")},
         })
 
+    warnings = _fixture_warnings(_resolve_strategies(cfg), data_source)
+    for w in warnings:
+        cfg._emit(f"WARNING: {w}")
+
     result = {
         "version": __version__,
         "mode": "compare",
         "seed": cfg.seed,
         "data_source": data_source,
         "baseline": baseline,
+        "warnings": warnings,
         "variants": variants,
     }
     if outdir:
@@ -200,9 +210,29 @@ def _seed_frauds(cfg: ProbeConfig, model, clean_test):
     return clean_fraud, seed_frauds
 
 
+def _resolve_strategies(cfg: ProbeConfig) -> tuple[str, ...]:
+    return tuple(cfg.strategies) if cfg.strategies else STRATEGIES
+
+
+def _fixture_warnings(strategies: tuple[str, ...], data_source: str) -> list[str]:
+    """Task 5: flag results that are an artefact of the synthetic fixture, not a
+    finding about fraud detection. Extend this if other strategies gain a similar
+    dependency on a fixture property the real PaySim data wouldn't share."""
+    warnings = []
+    if "temporal_dispersion" in strategies and data_source.startswith("synthetic:"):
+        warnings.append(
+            "temporal_dispersion was run against synthetic demo data. Its evasion rate "
+            "reflects the documented hour-of-day concentration assumption in "
+            "data.make_demo_data (fraud weighted toward 00:00-05:00), not a measured "
+            "property of real fraud. Re-run against real PaySim data before citing this "
+            "number."
+        )
+    return warnings
+
+
 def _attack_and_evaluate(cfg, model, clean_test, clean_fraud, seed_frauds, backend, baseline):
     """Generate a corpus with `backend`, stress-test it, and explain the evasion."""
-    strategies = tuple(cfg.strategies) if cfg.strategies else STRATEGIES
+    strategies = _resolve_strategies(cfg)
     cfg._emit(f"Generating adversarial corpus (backend={backend}, strategies={list(strategies)})...")
     corpus, adv_report = generate_adversarial_corpus(
         seed_frauds, strategies=strategies, backend=backend,
