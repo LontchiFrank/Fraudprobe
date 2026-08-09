@@ -26,6 +26,7 @@ def cmd_run(args) -> int:
         data=args.data,
         demo=bool(args.demo or not args.data),
         demo_rows=args.demo_rows,
+        sample_legit=args.sample_legit,
         model=args.model,
         model_type=args.model_type,
         save_model=args.save_model,
@@ -78,6 +79,10 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--data", type=str, default=None, help="Path to PaySim-shaped CSV.")
     r.add_argument("--demo", action="store_true", help="Use built-in synthetic data.")
     r.add_argument("--demo-rows", type=int, default=60_000)
+    r.add_argument("--sample-legit", type=int, default=None,
+                   help="Real PaySim only (--data): keep every fraud row plus a stratified "
+                        "random sample of this many legitimate rows, instead of all ~6.36M. "
+                        "The resulting fraud prevalence is always reported as observed_fraud_rate.")
     r.add_argument("--model", type=str, default=None,
                    help="Path to YOUR fitted classifier (.joblib) to test.")
     r.add_argument("--model-type", choices=["auto", "xgboost", "rf", "gbdt"], default="auto")

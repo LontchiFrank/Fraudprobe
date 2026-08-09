@@ -26,6 +26,7 @@ class ProbeConfig:
     data: str | None = None
     demo: bool = True
     demo_rows: int = 60_000
+    sample_legit: int | None = None     # real PaySim only: keep all fraud + this many sampled legit rows
     model: str | None = None            # path to a user's fitted .joblib
     model_type: str = "auto"            # auto | xgboost | rf | gbdt
     save_model: str | None = None
@@ -86,6 +87,9 @@ def run_probe(cfg: ProbeConfig) -> dict:
         outdir.mkdir(parents=True, exist_ok=True)
 
     df, data_source = _load_data(cfg)
+    data_stats = _data_stats(df)
+    cfg._emit(f"{data_stats['n_rows']} rows, observed fraud rate = "
+              f"{data_stats['observed_fraud_rate']:.4%} ({data_stats['n_fraud']} fraud).")
     model, clean_test, baseline = _fit_baseline(cfg, df)
     clean_fraud, seed_frauds = _seed_frauds(cfg, model, clean_test)
 
@@ -101,6 +105,7 @@ def run_probe(cfg: ProbeConfig) -> dict:
         "mode": "single",
         "seed": cfg.seed,
         "data_source": data_source,
+        **data_stats,
         "backend": cfg.backend,
         "llm_model": cfg.llm_model if cfg.backend == "llm" else None,
         "baseline": baseline,
@@ -130,6 +135,9 @@ def run_comparison(cfg: ProbeConfig, backends=("rules", "llm")) -> dict:
         outdir.mkdir(parents=True, exist_ok=True)
 
     df, data_source = _load_data(cfg)
+    data_stats = _data_stats(df)
+    cfg._emit(f"{data_stats['n_rows']} rows, observed fraud rate = "
+              f"{data_stats['observed_fraud_rate']:.4%} ({data_stats['n_fraud']} fraud).")
     model, clean_test, baseline = _fit_baseline(cfg, df)
     clean_fraud, seed_frauds = _seed_frauds(cfg, model, clean_test)
 
@@ -162,6 +170,7 @@ def run_comparison(cfg: ProbeConfig, backends=("rules", "llm")) -> dict:
         "mode": "compare",
         "seed": cfg.seed,
         "data_source": data_source,
+        **data_stats,
         "baseline": baseline,
         "warnings": warnings,
         "variants": variants,
@@ -177,10 +186,26 @@ def run_comparison(cfg: ProbeConfig, backends=("rules", "llm")) -> dict:
 # --------------------------------------------------------------------------- #
 def _load_data(cfg: ProbeConfig):
     if cfg.data and not cfg.demo:
-        cfg._emit(f"Loading dataset from {cfg.data}")
-        return load_paysim(cfg.data), f"paysim:{Path(cfg.data).name}"
+        cfg._emit(f"Loading dataset from {cfg.data}"
+                  + (f" (sampling {cfg.sample_legit} legit rows)" if cfg.sample_legit else ""))
+        df = load_paysim(cfg.data, sample_legit=cfg.sample_legit, seed=cfg.seed)
+        return df, f"paysim:{Path(cfg.data).name}"
     cfg._emit("Using built-in synthetic (PaySim-shaped) demo data.")
     return make_demo_data(n_rows=cfg.demo_rows, seed=cfg.seed), f"synthetic:{cfg.demo_rows}rows"
+
+
+def _data_stats(df: pd.DataFrame) -> dict:
+    """n_rows and observed_fraud_rate (Task 6) — written for every run, synthetic
+    or real, so the two are never confused: a demo run's ~1.3% fraud rate is an
+    order of magnitude easier than PaySim's real ~0.129%, and both must be
+    traceable from results.json alone."""
+    n_rows = int(len(df))
+    n_fraud = int(df["isFraud"].sum())
+    return {
+        "n_rows": n_rows,
+        "n_fraud": n_fraud,
+        "observed_fraud_rate": (n_fraud / n_rows) if n_rows else 0.0,
+    }
 
 
 def _fit_baseline(cfg: ProbeConfig, df):

@@ -66,6 +66,7 @@ def create_app() -> Flask:
         cfg = ProbeConfig(
             demo=True,
             demo_rows=int(body.get("demo_rows", 60_000)),
+            sample_legit=(int(body["sample_legit"]) if body.get("sample_legit") else None),
             model_type=str(body.get("model_type", "auto")),
             backend=str(body.get("backend", "rules")),
             llm_model=str(body.get("llm_model", "llama3")),

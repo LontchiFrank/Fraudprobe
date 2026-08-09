@@ -47,13 +47,55 @@ def _sample_steps(rng: np.random.Generator, n: int, hourly_weights: np.ndarray) 
     return days * 24 + hours + 1
 
 
-def load_paysim(path: str) -> pd.DataFrame:
-    """Load the real PaySim CSV (Lopez-Rojas & Axelsson, 2016) from disk."""
-    df = pd.read_csv(path)
+# Explicit dtypes for the numeric PaySim columns (Task 6). float64->float32 and
+# int64->int32/int8 roughly halves those columns' memory; the two identifier
+# columns dominate memory regardless of dtype choice (high-cardinality strings)
+# and are left as pandas' default. Together this keeps a full 6,362,620-row
+# PaySim load in the low gigabytes without needing chunked reading. pandas'
+# dtype= silently ignores any key here that isn't an actual column in the file,
+# so this is safe to pass even against a malformed CSV — the RAW_COLUMNS check
+# below still produces the friendly "Not a PaySim-shaped CSV" error in that case.
+_PAYSIM_DTYPES = {
+    "step": "int32",
+    "amount": "float32",
+    "oldbalanceOrg": "float32",
+    "newbalanceOrig": "float32",
+    "oldbalanceDest": "float32",
+    "newbalanceDest": "float32",
+    "isFraud": "int8",
+}
+
+
+def load_paysim(path: str, sample_legit: int | None = None, seed: int = 42) -> pd.DataFrame:
+    """Load the real PaySim CSV (Lopez-Rojas & Axelsson, 2016) from disk.
+
+    Downcasts the numeric columns on read so the full file loads comfortably in
+    memory (see _PAYSIM_DTYPES) rather than requiring chunked reading.
+
+    If ``sample_legit`` is given, keeps every fraud row and a stratified random
+    sample of ``sample_legit`` legitimate rows — for iterating on the full file's
+    realistic (~0.129%) fraud prevalence without training on all 6M+ legitimate
+    rows every run. Callers must report the *observed* fraud rate of whatever was
+    actually trained on (see pipeline.py's ``observed_fraud_rate``), never assume
+    it still matches PaySim's population rate after sampling.
+    """
+    df = pd.read_csv(path, dtype=_PAYSIM_DTYPES)
     missing = [c for c in RAW_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(f"Not a PaySim-shaped CSV. Missing columns: {missing}")
-    return df[RAW_COLUMNS + [c for c in df.columns if c not in RAW_COLUMNS]]
+    df = df[RAW_COLUMNS + [c for c in df.columns if c not in RAW_COLUMNS]]
+
+    if sample_legit is not None:
+        rng = np.random.default_rng(seed)
+        fraud = df[df["isFraud"] == 1]
+        legit = df[df["isFraud"] == 0]
+        if sample_legit < len(legit):
+            keep_idx = rng.choice(legit.index.to_numpy(), size=sample_legit, replace=False)
+            legit = legit.loc[keep_idx]
+        df = pd.concat([fraud, legit], ignore_index=True)
+        df = df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
+
+    return df
 
 
 def make_demo_data(n_rows: int = 60_000, fraud_rate: float = 0.013, seed: int = 42) -> pd.DataFrame:
