@@ -31,6 +31,7 @@ class ProbeConfig:
     save_model: str | None = None
     backend: str = "rules"              # rules | llm
     llm_model: str = "llama3"
+    require_llm: bool = False           # raise instead of degrading on any rules fallback
     strategies: tuple[str, ...] = STRATEGIES
     max_seeds: int = 500
     out: str | None = "fraudprobe_out"
@@ -58,7 +59,7 @@ def _sample_evading_rows(model: ScoredModel, corpus: pd.DataFrame, per_strategy:
     df["_fraud_score"] = proba
     df["_flagged"] = (proba >= model.threshold)
     cols = [
-        "mutation", "type", "amount", "oldbalanceOrg", "newbalanceOrig",
+        "mutation", "source", "type", "amount", "oldbalanceOrg", "newbalanceOrig",
         "oldbalanceDest", "newbalanceDest", "_fraud_score", "_flagged",
     ]
     cols = [c for c in cols if c in df.columns]
@@ -203,10 +204,15 @@ def _attack_and_evaluate(cfg, model, clean_test, clean_fraud, seed_frauds, backe
     cfg._emit(f"Generating adversarial corpus (backend={backend}, strategies={list(strategies)})...")
     corpus, adv_report = generate_adversarial_corpus(
         seed_frauds, strategies=strategies, backend=backend,
-        llm_model=cfg.llm_model, seed=cfg.seed,
+        llm_model=cfg.llm_model, seed=cfg.seed, require_llm=cfg.require_llm,
     )
     cfg._emit(f"{adv_report.n_generated} adversarial rows "
               f"({adv_report.n_rejected_invalid} rejected as economically invalid).")
+    if adv_report.n_llm_attempted:
+        rate = adv_report.llm_success_rate or 0.0
+        cfg._emit(f"LLM success rate: {rate*100:.1f}% "
+                  f"({adv_report.n_llm_success}/{adv_report.n_llm_attempted} calls)"
+                  + (f"; fallbacks: {adv_report.fallback_reasons}" if adv_report.fallback_reasons else ""))
     if corpus.empty:
         raise RuntimeError("No valid adversarial rows generated.")
 

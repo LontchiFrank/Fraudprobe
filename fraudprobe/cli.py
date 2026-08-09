@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 
 from . import __version__
-from .adversary import STRATEGIES
+from .adversary import STRATEGIES, LLMRequiredError
 from .pipeline import ProbeConfig, run_probe
 
 
@@ -31,6 +31,7 @@ def cmd_run(args) -> int:
         save_model=args.save_model,
         backend=args.backend,
         llm_model=args.llm_model,
+        require_llm=args.require_llm,
         strategies=tuple(args.strategies) if args.strategies else STRATEGIES,
         max_seeds=args.max_seeds,
         out=args.out,
@@ -40,6 +41,9 @@ def cmd_run(args) -> int:
     )
     try:
         result = run_probe(cfg)
+    except LLMRequiredError as exc:
+        print(f"[fraudprobe] --require-llm violated: {exc}", flush=True)
+        return 1
     except RuntimeError as exc:
         print(f"[fraudprobe] {exc}", flush=True)
         return 1
@@ -79,6 +83,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--backend", choices=["rules", "llm"], default="rules",
                    help="'rules' = deterministic mutations; 'llm' = local Ollama model.")
     r.add_argument("--llm-model", type=str, default="llama3")
+    r.add_argument("--require-llm", action="store_true",
+                   help="Abort instead of falling back to rules if any LLM mutation fails "
+                        "(guarantees a pure-LLM corpus for headline results).")
     r.add_argument("--strategies", nargs="*", choices=list(STRATEGIES), default=None)
     r.add_argument("--max-seeds", type=int, default=500)
     r.add_argument("--out", type=str, default="fraudprobe_out")

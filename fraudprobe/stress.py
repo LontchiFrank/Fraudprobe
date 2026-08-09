@@ -24,6 +24,7 @@ def stress_test(model: ScoredModel, clean_test: pd.DataFrame, corpus: pd.DataFra
 
     # Per-strategy evasion breakdown – the actionable part.
     per_strategy = {}
+    per_strategy_llm_only = {}
     if "mutation" in corpus.columns and len(corpus):
         corpus = corpus.copy()
         corpus["_proba"] = adv_proba
@@ -35,6 +36,18 @@ def stress_test(model: ScoredModel, clean_test: pd.DataFrame, corpus: pd.DataFra
                 "evasion_rate": round(1.0 - caught, 4),
             }
 
+        # Rows the LLM itself produced, excluding rules-backend and fallback rows —
+        # lets per-strategy evasion be recomputed for genuinely LLM-sourced rows only.
+        if "source" in corpus.columns:
+            llm_rows = corpus[corpus["source"] == "llm"]
+            for strat, grp in llm_rows.groupby("mutation"):
+                caught = float((grp["_proba"] >= model.threshold).mean())
+                per_strategy_llm_only[strat] = {
+                    "n": int(len(grp)),
+                    "detection_rate": round(caught, 4),
+                    "evasion_rate": round(1.0 - caught, 4),
+                }
+
     return {
         "clean_fraud_detection_rate": round(clean_caught, 4),
         "adversarial_detection_rate": round(adv_caught, 4),
@@ -43,6 +56,7 @@ def stress_test(model: ScoredModel, clean_test: pd.DataFrame, corpus: pd.DataFra
         "n_clean_fraud": int(len(clean_fraud)),
         "n_adversarial": int(len(corpus)),
         "per_strategy": per_strategy,
+        "per_strategy_llm_only": per_strategy_llm_only,
     }
 
 
@@ -67,6 +81,15 @@ def format_report(baseline: dict, stress: dict, adv_report) -> str:
     add(f"  Adversarial corpus     : {adv_report.n_generated} rows "
         f"({adv_report.backend} backend, {adv_report.n_rejected_invalid} rejected as invalid)")
     add(f"  Economic value check   : {'PASS' if adv_report.value_preserved else 'FAIL'}")
+    if adv_report.n_llm_attempted:
+        rate = adv_report.llm_success_rate or 0.0
+        add(f"  LLM success rate       : {rate*100:5.1f}% "
+            f"({adv_report.n_llm_success}/{adv_report.n_llm_attempted} calls)")
+        if adv_report.fallback_reasons:
+            reasons = ", ".join(
+                f"{k}={v}" for k, v in sorted(adv_report.fallback_reasons.items(), key=lambda kv: -kv[1])
+            )
+            add(f"  Fallback reasons       : {reasons}")
     add("")
     add("-" * 62)
     add(f"  Clean fraud detection rate       : {stress['clean_fraud_detection_rate']*100:5.1f}%")

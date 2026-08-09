@@ -21,6 +21,30 @@ import pandas as pd
 
 STRATEGIES = ("amount_split", "temporal_dispersion", "balance_camouflage")
 
+# Fields the LLM is asked to return for a mutated transaction. "amount" is the only
+# one we treat as mandatory for a response to count as schema-valid — the rest fall
+# back to the seed row's own values if the model omits them.
+_LLM_RESPONSE_FIELDS = (
+    "amount", "step", "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest",
+)
+_LLM_REQUIRED_FIELDS = ("amount",)
+
+# Reasons an LLM mutation can fall back to the rules implementation. Every fallback
+# is labelled with exactly one of these — never swallowed silently.
+FALLBACK_REASONS = (
+    "import_error", "connection_error", "timeout", "json_parse_error", "schema_error", "other",
+)
+
+
+class LLMRequiredError(Exception):
+    """Raised when --require-llm is set and a mutation fell back to the rules backend.
+
+    Deliberately NOT a RuntimeError subclass — pipeline.py catches RuntimeError to
+    mean "this backend produced an empty corpus, log it and move on" (see
+    run_comparison). A --require-llm violation is a harder failure than that and
+    must abort the run loudly instead of being logged and skipped.
+    """
+
 
 # --------------------------------------------------------------------------- #
 # Economic consistency validator
@@ -100,17 +124,23 @@ _RULES = {
 # --------------------------------------------------------------------------- #
 # LLM backend (optional) – matches the Ollama research setup
 # --------------------------------------------------------------------------- #
-def _mutate_llm(row: pd.Series, rng, strategy: str, model: str) -> pd.DataFrame:  # pragma: no cover
-    """Ask a local Ollama model to perform the mutation. Falls back on any failure.
+def _mutate_llm(row: pd.Series, rng, strategy: str, model: str) -> tuple[pd.DataFrame, bool, str | None]:
+    """Ask a local Ollama model to perform the mutation.
 
-    Kept import-light and defensive so the package installs and runs without ollama.
+    Returns ``(frame, used_llm, reason)``. ``used_llm`` is True only if the model's
+    own output was used; on any failure the rules implementation is substituted so
+    the pipeline always gets a usable row, but the failure is never swallowed —
+    ``reason`` is always one of ``FALLBACK_REASONS`` when ``used_llm`` is False, and
+    None when it succeeded. Kept import-light so the package installs and runs
+    without ollama; that specific case is reported as ``import_error``.
     """
     try:
         import json
 
+        import httpx  # transitive dependency of ollama; import alongside it
         import ollama  # type: ignore
     except ImportError:
-        return _RULES[strategy](row, rng)
+        return _RULES[strategy](row, rng), False, "import_error"
 
     prompt = (
         "You are an adversarial testing agent evaluating a fraud detector. "
@@ -120,16 +150,39 @@ def _mutate_llm(row: pd.Series, rng, strategy: str, model: str) -> pd.DataFrame:
         "newbalanceOrig, oldbalanceDest, newbalanceDest.\n\n"
         f"Transaction: {row[['amount','step','oldbalanceOrg','newbalanceOrig','oldbalanceDest','newbalanceDest']].to_dict()}"
     )
+
     try:
         resp = ollama.generate(model=model, prompt=prompt)
-        payload = json.loads(resp["response"][resp["response"].index("{"): resp["response"].rindex("}") + 1])
-        r = row.copy()
-        for k, v in payload.items():
-            if k in r.index:
-                r[k] = float(v)
-        return pd.DataFrame([r])
+    except ConnectionError:
+        # The ollama client wraps httpx.ConnectError (server not running) as this.
+        return _RULES[strategy](row, rng), False, "connection_error"
+    except httpx.TimeoutException:
+        return _RULES[strategy](row, rng), False, "timeout"
     except Exception:
-        return _RULES[strategy](row, rng)
+        return _RULES[strategy](row, rng), False, "other"
+
+    try:
+        text = resp["response"]
+        payload = json.loads(text[text.index("{"): text.rindex("}") + 1])
+    except (KeyError, ValueError):
+        # No '{'/'}' found (.index/.rindex raise ValueError), or invalid JSON.
+        return _RULES[strategy](row, rng), False, "json_parse_error"
+
+    # The isinstance check can't be hit today (slicing between the first '{' and
+    # last '}' always yields either a dict or invalid JSON), but stays in place for
+    # the multi-row array parsing an LLM-driven amount_split will need (Task 2).
+    if not isinstance(payload, dict) or not all(f in payload for f in _LLM_REQUIRED_FIELDS):
+        return _RULES[strategy](row, rng), False, "schema_error"
+
+    try:
+        r = row.copy()
+        for k in _LLM_RESPONSE_FIELDS:
+            if k in payload:
+                r[k] = float(payload[k])
+        return pd.DataFrame([r]), True, None
+    except (TypeError, ValueError):
+        # A field was present but not coercible to float (e.g. a string label).
+        return _RULES[strategy](row, rng), False, "schema_error"
 
 
 # --------------------------------------------------------------------------- #
@@ -143,6 +196,13 @@ class AdversaryReport:
     value_preserved: bool
     backend: str
     strategies: list[str] = field(default_factory=list)
+    # LLM provenance (Task 1). Zero/None throughout for the 'rules' backend, since
+    # the LLM is never attempted — that is distinct from "attempted and failed".
+    n_llm_attempted: int = 0
+    n_llm_success: int = 0
+    n_llm_fallback: int = 0
+    llm_success_rate: float | None = None
+    fallback_reasons: dict[str, int] = field(default_factory=dict)
 
 
 def generate_adversarial_corpus(
@@ -151,23 +211,52 @@ def generate_adversarial_corpus(
     backend: str = "rules",
     llm_model: str = "llama3",
     seed: int = 42,
+    require_llm: bool = False,
 ) -> tuple[pd.DataFrame, AdversaryReport]:
-    """Produce the mutated corpus from a set of seed fraudulent rows."""
+    """Produce the mutated corpus from a set of seed fraudulent rows.
+
+    Every generated row is tagged with a ``source`` column: ``"llm"`` for rows the
+    model itself produced, ``"rules_fallback"`` for LLM-backend rows that fell back
+    after a failure, and ``"rules"`` for a genuine rules-backend run (never
+    attempted the LLM at all — not the same thing as a fallback). This is what lets
+    per-strategy evasion be recomputed for LLM-sourced rows only.
+
+    If ``require_llm`` is set and any mutation falls back to rules, raises
+    ``LLMRequiredError`` immediately rather than degrading the corpus — for
+    producing a headline result that is guaranteed pure-LLM.
+    """
     rng = np.random.default_rng(seed)
     generated, rejected = [], 0
+    n_llm_attempted = n_llm_success = 0
+    fallback_reasons: dict[str, int] = {}
 
     for _, row in seed_frauds.iterrows():
         for strat in strategies:
             if backend == "llm":
-                muts = _mutate_llm(row, rng, strat, llm_model)
+                n_llm_attempted += 1
+                muts, used_llm, reason = _mutate_llm(row, rng, strat, llm_model)
+                if used_llm:
+                    n_llm_success += 1
+                    source = "llm"
+                else:
+                    fallback_reasons[reason] = fallback_reasons.get(reason, 0) + 1
+                    source = "rules_fallback"
+                    if require_llm:
+                        raise LLMRequiredError(
+                            f"--require-llm set but a mutation fell back to rules "
+                            f"(reason={reason}) after {n_llm_success}/{n_llm_attempted} "
+                            f"LLM calls succeeded."
+                        )
             else:
                 muts = _RULES[strat](row, rng)
+                source = "rules"
 
             for _, m in muts.iterrows():
                 if is_economically_valid(m):
                     m = m.copy()
                     m["isFraud"] = 1
                     m["mutation"] = strat
+                    m["source"] = source
                     generated.append(m)
                 else:
                     rejected += 1
@@ -181,6 +270,7 @@ def generate_adversarial_corpus(
     if not corpus.empty:
         value_ok = total_value(corpus) <= total_value(seed_frauds) * len(strategies) + 1.0
 
+    n_llm_fallback = sum(fallback_reasons.values())
     report = AdversaryReport(
         n_seed=len(seed_frauds),
         n_generated=len(corpus),
@@ -188,5 +278,10 @@ def generate_adversarial_corpus(
         value_preserved=value_ok,
         backend=backend,
         strategies=list(strategies),
+        n_llm_attempted=n_llm_attempted,
+        n_llm_success=n_llm_success,
+        n_llm_fallback=n_llm_fallback,
+        llm_success_rate=(n_llm_success / n_llm_attempted) if n_llm_attempted else None,
+        fallback_reasons=fallback_reasons,
     )
     return corpus, report

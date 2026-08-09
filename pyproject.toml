@@ -48,3 +48,6 @@ include = ["fraudprobe*"]
 
 [tool.setuptools.package-data]
 fraudprobe = ["templates/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
