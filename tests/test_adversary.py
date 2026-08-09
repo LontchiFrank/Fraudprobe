@@ -91,13 +91,16 @@ def test_llm_schema_error_non_numeric_field(monkeypatch, seed_frauds):
 
 
 def test_llm_success(monkeypatch, seed_frauds):
+    # balance_camouflage (not amount_split) exercises the generic single-row
+    # contract; amount_split's proportions contract is covered in
+    # test_adversary_task2.py.
     ollama = pytest.importorskip("ollama")
     monkeypatch.setattr(
         ollama, "generate",
         lambda **kw: {"response": 'Sure! {"amount": 4000.0, "oldbalanceOrg": 10000.0, '
                                    '"newbalanceOrig": 6000.0, "oldbalanceDest": 0.0, "newbalanceDest": 4000.0}'},
     )
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "balance_camouflage", "llama3")
     assert used_llm is True
     assert reason is None
     assert frame.iloc[0]["amount"] == 4000.0
@@ -135,6 +138,10 @@ def test_llm_backend_reports_success_rate_and_fallback_reasons(monkeypatch, seed
         calls["n"] += 1
         if calls["n"] % 2 == 0:
             raise ConnectionError("down")
+        # amount_split's contract is a proportions array (Task 2); every other
+        # strategy expects a single finished row.
+        if "proportions" in kwargs.get("prompt", ""):
+            return {"response": '{"proportions": [0.5, 0.3, 0.2]}'}
         return {"response": '{"amount": 999.0}'}
 
     monkeypatch.setattr(ollama, "generate", flaky)
@@ -163,7 +170,13 @@ def test_require_llm_raises_on_first_fallback(monkeypatch, seed_frauds):
 
 def test_require_llm_passes_when_llm_always_succeeds(monkeypatch, seed_frauds):
     ollama = pytest.importorskip("ollama")
-    monkeypatch.setattr(ollama, "generate", lambda **kw: {"response": '{"amount": 999.0}'})
+
+    def always_ok(**kwargs):
+        if "proportions" in kwargs.get("prompt", ""):
+            return {"response": '{"proportions": [0.5, 0.3, 0.2]}'}
+        return {"response": '{"amount": 999.0}'}
+
+    monkeypatch.setattr(ollama, "generate", always_ok)
     corpus, report = generate_adversarial_corpus(
         seed_frauds, strategies=STRATEGIES, backend="llm", seed=1, require_llm=True
     )

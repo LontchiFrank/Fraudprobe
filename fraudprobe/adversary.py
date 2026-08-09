@@ -21,9 +21,13 @@ import pandas as pd
 
 STRATEGIES = ("amount_split", "temporal_dispersion", "balance_camouflage")
 
-# Fields the LLM is asked to return for a mutated transaction. "amount" is the only
-# one we treat as mandatory for a response to count as schema-valid — the rest fall
-# back to the seed row's own values if the model omits them.
+# Two response contracts, one per strategy shape:
+#  - amount_split asks for {"proportions": [...]} — a list of >=2 positive numbers
+#    (see _split_amount / _llm_prompt); it never asks the model to do the balance
+#    arithmetic itself.
+#  - every other strategy asks for a single finished row. "amount" is the only
+#    field we treat as mandatory for schema-validity; the rest fall back to the
+#    seed row's own values if the model omits them.
 _LLM_RESPONSE_FIELDS = (
     "amount", "step", "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest",
 )
@@ -71,9 +75,14 @@ def total_value(rows: pd.DataFrame) -> float:
 # --------------------------------------------------------------------------- #
 # Rule-based mutation strategies
 # --------------------------------------------------------------------------- #
-def _mutate_amount_split(row: pd.Series, rng, n: int = 3) -> pd.DataFrame:
-    """Break one large transfer into several smaller ones that sum to the same value."""
-    weights = rng.uniform(0.5, 1.5, size=n)
+# amount_split's row-construction contract, shared by both backends (Task 2): a
+# strategy maps one seed row to a DataFrame of one or more rows. The rules backend
+# picks its own random weights; the LLM backend picks the *proportions* (how many
+# parts, and their relative sizes) but the actual balance arithmetic is always done
+# here in Python, never trusted to the model's own arithmetic.
+def _split_amount(row: pd.Series, weights) -> pd.DataFrame:
+    """Break one large transfer into len(weights) smaller ones that sum to the same value."""
+    weights = np.clip(np.asarray(weights, dtype=float), 1e-6, None)
     weights = weights / weights.sum()
     parts = np.round(row["amount"] * weights, 2)
     parts[-1] = round(row["amount"] - parts[:-1].sum(), 2)  # keep the sum exact
@@ -90,6 +99,18 @@ def _mutate_amount_split(row: pd.Series, rng, n: int = 3) -> pd.DataFrame:
         r["newbalanceDest"] = round(row["oldbalanceDest"] + p, 2)
         rows.append(r)
     return pd.DataFrame(rows)
+
+
+# Number of parts the rules backend splits into, and what the LLM is asked to
+# match — keeping both at the same n is what makes per-strategy evasion rates
+# comparable across backends (Task 2's core requirement).
+AMOUNT_SPLIT_PARTS = 3
+
+
+def _mutate_amount_split(row: pd.Series, rng, n: int = AMOUNT_SPLIT_PARTS) -> pd.DataFrame:
+    """Break one large transfer into several smaller ones that sum to the same value."""
+    weights = rng.uniform(0.5, 1.5, size=n)
+    return _split_amount(row, weights)
 
 
 def _mutate_temporal(row: pd.Series, rng) -> pd.DataFrame:
@@ -124,6 +145,33 @@ _RULES = {
 # --------------------------------------------------------------------------- #
 # LLM backend (optional) – matches the Ollama research setup
 # --------------------------------------------------------------------------- #
+def _llm_prompt(row: pd.Series, strategy: str) -> str:
+    txn = row[["amount", "step", "oldbalanceOrg", "newbalanceOrig", "oldbalanceDest", "newbalanceDest"]].to_dict()
+    if strategy == "amount_split":
+        # We ask for PROPORTIONS, not finished rows: the model decides the shape of
+        # the split (how many parts, how uneven), but the actual balance arithmetic
+        # for each resulting row is always done in Python via _split_amount — never
+        # trusted to the model, which is what keeps every row economically valid.
+        return (
+            "You are an adversarial testing agent evaluating a fraud detector. "
+            f"Split this transaction's amount into exactly {AMOUNT_SPLIT_PARTS} parts that sum to "
+            "the original amount, structured as a real 'structuring' attack (parts of uneven, "
+            "plausible size — not a mechanical equal split). "
+            "Respond ONLY with a JSON object: {\"proportions\": [p1, p2, ...]} where the p_i are "
+            f"positive numbers (any scale — they will be normalised) and there are exactly "
+            f"{AMOUNT_SPLIT_PARTS} of them.\n\n"
+            f"Transaction: {txn}"
+        )
+    return (
+        "You are an adversarial testing agent evaluating a fraud detector. "
+        "Rewrite the following transaction so it looks less like fraud, using the "
+        f"strategy '{strategy}', while preserving the total amount moved. "
+        "Respond ONLY with a JSON object with keys: amount, step, oldbalanceOrg, "
+        "newbalanceOrig, oldbalanceDest, newbalanceDest.\n\n"
+        f"Transaction: {txn}"
+    )
+
+
 def _mutate_llm(row: pd.Series, rng, strategy: str, model: str) -> tuple[pd.DataFrame, bool, str | None]:
     """Ask a local Ollama model to perform the mutation.
 
@@ -133,6 +181,10 @@ def _mutate_llm(row: pd.Series, rng, strategy: str, model: str) -> tuple[pd.Data
     ``reason`` is always one of ``FALLBACK_REASONS`` when ``used_llm`` is False, and
     None when it succeeded. Kept import-light so the package installs and runs
     without ollama; that specific case is reported as ``import_error``.
+
+    ``amount_split`` returns multiple rows (one per proportion the model chose),
+    matching the rules backend's contract of one seed row -> one-or-more rows —
+    see _llm_prompt for why this is proportions, not finished rows (Task 2).
     """
     try:
         import json
@@ -142,14 +194,7 @@ def _mutate_llm(row: pd.Series, rng, strategy: str, model: str) -> tuple[pd.Data
     except ImportError:
         return _RULES[strategy](row, rng), False, "import_error"
 
-    prompt = (
-        "You are an adversarial testing agent evaluating a fraud detector. "
-        "Rewrite the following transaction so it looks less like fraud, using the "
-        f"strategy '{strategy}', while preserving the total amount moved. "
-        "Respond ONLY with a JSON object with keys: amount, step, oldbalanceOrg, "
-        "newbalanceOrig, oldbalanceDest, newbalanceDest.\n\n"
-        f"Transaction: {row[['amount','step','oldbalanceOrg','newbalanceOrig','oldbalanceDest','newbalanceDest']].to_dict()}"
-    )
+    prompt = _llm_prompt(row, strategy)
 
     try:
         resp = ollama.generate(model=model, prompt=prompt)
@@ -168,10 +213,22 @@ def _mutate_llm(row: pd.Series, rng, strategy: str, model: str) -> tuple[pd.Data
         # No '{'/'}' found (.index/.rindex raise ValueError), or invalid JSON.
         return _RULES[strategy](row, rng), False, "json_parse_error"
 
-    # The isinstance check can't be hit today (slicing between the first '{' and
-    # last '}' always yields either a dict or invalid JSON), but stays in place for
-    # the multi-row array parsing an LLM-driven amount_split will need (Task 2).
-    if not isinstance(payload, dict) or not all(f in payload for f in _LLM_REQUIRED_FIELDS):
+    if not isinstance(payload, dict):
+        return _RULES[strategy](row, rng), False, "schema_error"
+
+    if strategy == "amount_split":
+        proportions = payload.get("proportions")
+        if not isinstance(proportions, list) or len(proportions) < 2:
+            return _RULES[strategy](row, rng), False, "schema_error"
+        try:
+            weights = [float(p) for p in proportions]
+        except (TypeError, ValueError):
+            return _RULES[strategy](row, rng), False, "schema_error"
+        if any(w <= 0 for w in weights):
+            return _RULES[strategy](row, rng), False, "schema_error"
+        return _split_amount(row, weights), True, None
+
+    if not all(f in payload for f in _LLM_REQUIRED_FIELDS):
         return _RULES[strategy](row, rng), False, "schema_error"
 
     try:
