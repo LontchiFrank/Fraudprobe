@@ -111,6 +111,28 @@ Every run writes `adversarial_corpus.csv`, `results.json` (now including the SHA
 attribution and sample evasions), and `report.txt` with a fixed seed for full
 reproducibility.
 
+## Methodological rigor
+
+fraudprobe is being hardened against a validity review (see `TASKS.md`) so every
+number in a report is measured, not assumed. So far:
+
+- **LLM provenance** — every mutation is tagged `source=llm`, `source=rules_fallback`,
+  or `source=rules`, and the corpus/`results.json` report `llm_success_rate` and a
+  breakdown of *why* any call fell back (`connection_error`, `timeout`,
+  `json_parse_error`, `schema_error`, ...). `--require-llm` aborts instead of
+  silently degrading to rules, for headline results that must be pure-LLM.
+- **Matched interventions** — `amount_split` produces the same number of rows under
+  both backends (the LLM proposes *proportions*, Python always does the balance
+  arithmetic), so per-strategy evasion is comparable across rules vs. LLM.
+- **Economic validation** — `--validation strict` (default) additionally requires
+  that `newbalanceOrig`/`newbalanceDest` actually reconcile with `amount`, not just
+  that signs and funds are plausible. `--validation lenient` restores the original,
+  looser check, so both can be run and the difference reported.
+- **Value retention** — `results.json` reports mean/median/min retained value per
+  strategy (not forced to 1.0 — `balance_camouflage`'s deliberate residual shows up
+  honestly as ~97%). `--min-value-retention` (default `0.90`) drops mutations that
+  abandon most of the money before they can be counted as an "evasion".
+
 ## Research context
 
 fraudprobe is the reference implementation for the MSc dissertation *"Evaluating the

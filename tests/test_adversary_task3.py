@@ -117,9 +117,12 @@ def test_llm_backend_records_rejection_reasons_under_strict(monkeypatch, seed_fr
     ollama = pytest.importorskip("ollama")
     # A response that changes 'amount' but leaves the balances untouched — passes
     # the old lenient checks (signs ok, doesn't overspend) but fails to reconcile.
+    # 9700/10000 = 0.97 retention keeps this above Task 4's default 0.90 threshold,
+    # so lenient mode's acceptance isn't ALSO vetoed by the separate value filter —
+    # this test is about arithmetic reconciliation specifically, not value retention.
     monkeypatch.setattr(
         ollama, "generate",
-        lambda **kw: {"response": '{"amount": 500.0}'},  # oldbalance/newbalance left as the seed's
+        lambda **kw: {"response": '{"amount": 9700.0}'},  # oldbalance/newbalance left as the seed's
     )
     corpus, report = generate_adversarial_corpus(
         seed_frauds, strategies=("balance_camouflage",), backend="llm", seed=1, validation="strict",

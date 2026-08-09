@@ -87,6 +87,13 @@ def format_report(baseline: dict, stress: dict, adv_report) -> str:
             f"{k}={v}" for k, v in sorted(adv_report.rejection_reasons.items(), key=lambda kv: -kv[1])
         )
         add(f"  Rejection reasons      : {reasons}")
+    if adv_report.n_rejected_low_value:
+        add(f"  Low-value rejections   : {adv_report.n_rejected_low_value} "
+            f"(retained < {adv_report.min_value_retention:.0%} of original amount)")
+    if adv_report.value_retention:
+        add("  Value retention (mean / median / min, per strategy):")
+        for strat, v in adv_report.value_retention.items():
+            add(f"    {strat:22s} {v['mean']*100:5.1f}% / {v['median']*100:5.1f}% / {v['min']*100:5.1f}%")
     if adv_report.n_llm_attempted:
         rate = adv_report.llm_success_rate or 0.0
         add(f"  LLM success rate       : {rate*100:5.1f}% "

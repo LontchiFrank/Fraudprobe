@@ -71,6 +71,7 @@ def create_app() -> Flask:
             llm_model=str(body.get("llm_model", "llama3")),
             require_llm=bool(body.get("require_llm", False)),
             validation=str(body.get("validation", "strict")),
+            min_value_retention=float(body.get("min_value_retention", 0.90)),
             strategies=tuple(strategies),
             max_seeds=int(body.get("max_seeds", 500)),
             explain=bool(body.get("explain", True)),

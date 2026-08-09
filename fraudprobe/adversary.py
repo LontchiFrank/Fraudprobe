@@ -295,6 +295,13 @@ class AdversaryReport:
     # Economic validation (Task 3).
     validation_mode: str = "strict"
     rejection_reasons: dict[str, int] = field(default_factory=dict)
+    # Value preservation (Task 4). value_retention[strategy] = {n, mean, median,
+    # min, prop_within_1pct} computed over one retention ratio per (seed, strategy)
+    # group that survived economic validation — i.e. this measures how much of the
+    # money the *intervention* preserved, not an arbitrary per-row artefact.
+    min_value_retention: float = 0.90
+    n_rejected_low_value: int = 0
+    value_retention: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 def generate_adversarial_corpus(
@@ -305,6 +312,7 @@ def generate_adversarial_corpus(
     seed: int = 42,
     require_llm: bool = False,
     validation: str = "strict",
+    min_value_retention: float = 0.90,
 ) -> tuple[pd.DataFrame, AdversaryReport]:
     """Produce the mutated corpus from a set of seed fraudulent rows.
 
@@ -322,12 +330,22 @@ def generate_adversarial_corpus(
     ``is_economically_valid``. Rejections are counted per reason on the returned
     report so "how much evasion survives once impossible transactions are
     excluded" is answerable from the artefacts alone.
+
+    ``min_value_retention`` (Task 4): for each (seed, strategy) pair, the fraction
+    of the seed's original amount retained across whichever of its mutated rows
+    passed economic validation. Groups below this threshold are dropped from the
+    corpus entirely — an "evasion" that abandons most of the money isn't one — but
+    every group's retention ratio is still recorded in ``value_retention`` (mean,
+    median, min, proportion within ±1% of 1.0, per strategy) regardless of whether
+    it was kept, so the reported distribution is honest rather than survivor-biased.
     """
     rng = np.random.default_rng(seed)
     generated, rejected = [], 0
     n_llm_attempted = n_llm_success = 0
     fallback_reasons: dict[str, int] = {}
     rejection_reasons: dict[str, int] = {}
+    n_rejected_low_value = 0
+    retention_by_strategy: dict[str, list[float]] = {s: [] for s in strategies}
 
     for _, row in seed_frauds.iterrows():
         for strat in strategies:
@@ -350,6 +368,7 @@ def generate_adversarial_corpus(
                 muts = _RULES[strat](row, rng)
                 source = "rules"
 
+            valid_rows = []
             for _, m in muts.iterrows():
                 valid, why_not = is_economically_valid(m, mode=validation)
                 if valid:
@@ -357,10 +376,22 @@ def generate_adversarial_corpus(
                     m["isFraud"] = 1
                     m["mutation"] = strat
                     m["source"] = source
-                    generated.append(m)
+                    valid_rows.append(m)
                 else:
                     rejected += 1
                     rejection_reasons[why_not] = rejection_reasons.get(why_not, 0) + 1
+
+            if not valid_rows:
+                continue  # nothing survived economic validation for this seed+strategy
+
+            retained_fraction = sum(r["amount"] for r in valid_rows) / row["amount"] if row["amount"] else 0.0
+            retention_by_strategy[strat].append(retained_fraction)
+
+            if retained_fraction < min_value_retention:
+                n_rejected_low_value += 1
+                continue  # abandons too much of the money to count as an evasion
+
+            generated.extend(valid_rows)
 
     corpus = pd.DataFrame(generated).reset_index(drop=True) if generated else pd.DataFrame()
 
@@ -370,6 +401,19 @@ def generate_adversarial_corpus(
     value_ok = True
     if not corpus.empty:
         value_ok = total_value(corpus) <= total_value(seed_frauds) * len(strategies) + 1.0
+
+    value_retention: dict[str, dict[str, float]] = {}
+    for strat, values in retention_by_strategy.items():
+        if not values:
+            continue
+        arr = np.asarray(values, dtype=float)
+        value_retention[strat] = {
+            "n": int(len(arr)),
+            "mean": float(np.mean(arr)),
+            "median": float(np.median(arr)),
+            "min": float(np.min(arr)),
+            "prop_within_1pct": float(np.mean(np.abs(arr - 1.0) <= 0.01)),
+        }
 
     n_llm_fallback = sum(fallback_reasons.values())
     report = AdversaryReport(
@@ -386,5 +430,8 @@ def generate_adversarial_corpus(
         fallback_reasons=fallback_reasons,
         validation_mode=validation,
         rejection_reasons=rejection_reasons,
+        min_value_retention=min_value_retention,
+        n_rejected_low_value=n_rejected_low_value,
+        value_retention=value_retention,
     )
     return corpus, report

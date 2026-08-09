@@ -33,6 +33,7 @@ def cmd_run(args) -> int:
         llm_model=args.llm_model,
         require_llm=args.require_llm,
         validation=args.validation,
+        min_value_retention=args.min_value_retention,
         strategies=tuple(args.strategies) if args.strategies else STRATEGIES,
         max_seeds=args.max_seeds,
         out=args.out,
@@ -91,6 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="'strict' (default) also requires balances to reconcile "
                         "(newbalanceOrig ~= oldbalanceOrg - amount, etc.); "
                         "'lenient' is fraudprobe's original signs-and-funds-only check.")
+    r.add_argument("--min-value-retention", type=float, default=0.90,
+                   help="Drop a seed+strategy's mutated rows if together they retain less than "
+                        "this fraction of the original amount (default 0.90). An 'evasion' that "
+                        "abandons most of the money isn't one.")
     r.add_argument("--strategies", nargs="*", choices=list(STRATEGIES), default=None)
     r.add_argument("--max-seeds", type=int, default=500)
     r.add_argument("--out", type=str, default="fraudprobe_out")
