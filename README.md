@@ -132,6 +132,17 @@ number in a report is measured, not assumed. So far:
   strategy (not forced to 1.0 — `balance_camouflage`'s deliberate residual shows up
   honestly as ~97%). `--min-value-retention` (default `0.90`) drops mutations that
   abandon most of the money before they can be counted as an "evasion".
+- **Real data path** — `load_paysim` downcasts numeric dtypes so the full 6.36M-row
+  PaySim CSV loads in ~1.3GB without chunking. `--sample-legit N` keeps every fraud
+  row plus a stratified sample of legitimate ones; every run (synthetic or real)
+  reports `n_rows`/`observed_fraud_rate` so the two are never confused.
+- **Tuned baseline** — hyperparameters are selected via stratified 5-fold grid
+  search with SMOTE fit *inside* each fold (never on validation data), then refit
+  once on the full training partition. `results.json`'s `baseline.tuning` records
+  the search space, winning parameters, and cross-validated F1 (mean ± std).
+  Tuning is on by default; pass `--no-tune` for the old fixed-hyperparameter, fast
+  behaviour when iterating quickly (grid search adds ~15-20s for XGBoost/`auto` at
+  demo scale, more for `rf`/`gbdt`, which are inherently slower per fit).
 
 ## Research context
 

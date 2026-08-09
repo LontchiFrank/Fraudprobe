@@ -68,6 +68,7 @@ def create_app() -> Flask:
             demo_rows=int(body.get("demo_rows", 60_000)),
             sample_legit=(int(body["sample_legit"]) if body.get("sample_legit") else None),
             model_type=str(body.get("model_type", "auto")),
+            tune=bool(body.get("tune", False)),  # dashboard defaults tuning OFF: interactive, not a citation run
             backend=str(body.get("backend", "rules")),
             llm_model=str(body.get("llm_model", "llama3")),
             require_llm=bool(body.get("require_llm", False)),

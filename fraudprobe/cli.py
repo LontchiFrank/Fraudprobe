@@ -29,6 +29,7 @@ def cmd_run(args) -> int:
         sample_legit=args.sample_legit,
         model=args.model,
         model_type=args.model_type,
+        tune=not args.no_tune,
         save_model=args.save_model,
         backend=args.backend,
         llm_model=args.llm_model,
@@ -86,6 +87,9 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--model", type=str, default=None,
                    help="Path to YOUR fitted classifier (.joblib) to test.")
     r.add_argument("--model-type", choices=["auto", "xgboost", "rf", "gbdt"], default="auto")
+    r.add_argument("--no-tune", action="store_true",
+                   help="Skip the stratified 5-fold grid-search hyperparameter tuning (default: "
+                        "tuning is ON) and use fixed hyperparameters for fast iteration.")
     r.add_argument("--save-model", type=str, default=None)
     r.add_argument("--backend", choices=["rules", "llm"], default="rules",
                    help="'rules' = deterministic mutations; 'llm' = local Ollama model.")

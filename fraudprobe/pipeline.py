@@ -29,6 +29,7 @@ class ProbeConfig:
     sample_legit: int | None = None     # real PaySim only: keep all fraud + this many sampled legit rows
     model: str | None = None            # path to a user's fitted .joblib
     model_type: str = "auto"            # auto | xgboost | rf | gbdt
+    tune: bool = True                   # grid-search CV hyperparameter tuning (--no-tune to skip)
     save_model: str | None = None
     backend: str = "rules"              # rules | llm
     llm_model: str = "llama3"
@@ -212,11 +213,15 @@ def _fit_baseline(cfg: ProbeConfig, df):
     if cfg.model:
         cfg._emit(f"Loading your classifier: {cfg.model}")
         model = ScoredModel.load(cfg.model)
-        _, clean_test, baseline = train_baseline(df, model_type="rf", seed=cfg.seed)
+        # Untuned and throwaway: this is only to get a clean_test split and a
+        # reference baseline metrics dict, not the model actually being probed.
+        _, clean_test, baseline = train_baseline(df, model_type="rf", seed=cfg.seed, tune=False)
         baseline["model_type"] = f"user:{Path(cfg.model).name}"
     else:
         cfg._emit(f"Training baseline classifier ({cfg.model_type})...")
-        model, clean_test, baseline = train_baseline(df, model_type=cfg.model_type, seed=cfg.seed)
+        model, clean_test, baseline = train_baseline(
+            df, model_type=cfg.model_type, seed=cfg.seed, tune=cfg.tune, log=cfg._emit,
+        )
         if cfg.save_model:
             model.save(cfg.save_model)
             cfg._emit(f"Saved baseline model to {cfg.save_model}")

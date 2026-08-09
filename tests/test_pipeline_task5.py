@@ -27,7 +27,7 @@ def test_no_fixture_warning_for_real_paysim_data():
 def test_run_probe_surfaces_warning_in_result_and_log(tmp_path):
     logs = []
     cfg = ProbeConfig(
-        demo=True, demo_rows=8_000, model_type="rf", backend="rules",
+        demo=True, demo_rows=8_000, model_type="rf", tune=False, backend="rules",
         strategies=("temporal_dispersion",), max_seeds=10, explain=False,
         out=str(tmp_path), seed=1, log=logs.append,
     )
@@ -39,7 +39,7 @@ def test_run_probe_surfaces_warning_in_result_and_log(tmp_path):
 
 def test_run_probe_no_warning_for_non_temporal_strategy(tmp_path):
     cfg = ProbeConfig(
-        demo=True, demo_rows=8_000, model_type="rf", backend="rules",
+        demo=True, demo_rows=8_000, model_type="rf", tune=False, backend="rules",
         strategies=("amount_split",), max_seeds=10, explain=False,
         out=str(tmp_path), seed=1,
     )

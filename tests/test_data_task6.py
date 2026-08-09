@@ -107,7 +107,7 @@ def test_run_probe_reports_n_rows_and_observed_fraud_rate(tmp_path):
     from fraudprobe.pipeline import ProbeConfig, run_probe
 
     cfg = ProbeConfig(
-        demo=True, demo_rows=8_000, model_type="rf", backend="rules",
+        demo=True, demo_rows=8_000, model_type="rf", tune=False, backend="rules",
         strategies=("amount_split",), max_seeds=10, explain=False,
         out=str(tmp_path), seed=1,
     )
