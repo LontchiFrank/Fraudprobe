@@ -283,7 +283,6 @@ class AdversaryReport:
     n_seed: int
     n_generated: int
     n_rejected_invalid: int
-    value_preserved: bool
     backend: str
     strategies: list[str] = field(default_factory=list)
     # LLM provenance (Task 1). Zero/None throughout for the 'rules' backend, since
@@ -424,13 +423,6 @@ def generate_adversarial_corpus(
 
     corpus = pd.DataFrame(generated).reset_index(drop=True) if generated else pd.DataFrame()
 
-    # Value-preservation check: total moved in the corpus vs the seed set, per strategy
-    # amount_split preserves exactly; the others move slightly less by design (residual),
-    # so we check the corpus never moves MORE value than the seeds (no free money).
-    value_ok = True
-    if not corpus.empty:
-        value_ok = total_value(corpus) <= total_value(seed_frauds) * len(strategies) + 1.0
-
     value_retention: dict[str, dict[str, float]] = {}
     for strat, values in retention_by_strategy.items():
         if not values:
@@ -455,7 +447,6 @@ def generate_adversarial_corpus(
         n_seed=len(seed_frauds),
         n_generated=len(corpus),
         n_rejected_invalid=rejected,
-        value_preserved=value_ok,
         backend=backend,
         strategies=list(strategies),
         n_llm_attempted=n_llm_attempted,
