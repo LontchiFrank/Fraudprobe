@@ -166,7 +166,7 @@ number in a report is measured, not assumed. So far:
   `out/figures/` (PR/ROC curves, confusion matrices, per-strategy evasion with
   Wilson CIs, the threshold sweep, SHAP summary, and evasion levers), CSV tables
   to `out/results_tables/`, and `out/MANIFEST.json` (package/Python/OS/CPU/RAM,
-  Ollama model, git commit, seed(s), wall-clock, full CLI
+  Ollama model, git commit + dirty flag (with diff stat when dirty), seed(s), wall-clock, full CLI
   invocation) — for single runs, `--compare`, and `--n-runs` alike, so the exact
   runs cited in a report all produce the same artefacts, generated rather than
   screenshotted.

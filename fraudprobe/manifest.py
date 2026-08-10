@@ -37,6 +37,31 @@ def _git_commit() -> str | None:
         return None
 
 
+def _git_dirty() -> bool | None:
+    try:
+        out = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True, timeout=5,
+            cwd=Path(__file__).resolve().parent,
+        )
+        return bool(out.stdout.strip()) if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _git_diff_stat() -> str | None:
+    """Only called when the tree is dirty — records what differs from the
+    recorded commit hash, since a commit hash alone doesn't tell a reviewer
+    that (REVIEW.md item 6)."""
+    try:
+        out = subprocess.run(
+            ["git", "diff", "--stat", "HEAD"], capture_output=True, text=True, timeout=5,
+            cwd=Path(__file__).resolve().parent,
+        )
+        return out.stdout.strip() if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
 def _total_ram_bytes() -> int | None:
     """Best-effort total system RAM without adding a new dependency."""
     try:
@@ -96,9 +121,13 @@ def write_manifest(
     backend = result.get("backend") or "compare"
     llm_model = result.get("llm_model")
 
+    git_dirty = _git_dirty()
+
     manifest = {
         "fraudprobe_version": result.get("version"),
         "git_commit": _git_commit(),
+        "git_dirty": git_dirty,
+        "git_diff_stat": _git_diff_stat() if git_dirty else None,
         "cli_invocation": cli_argv if cli_argv is not None else sys.argv,
         "python_version": platform.python_version(),
         "platform": {
