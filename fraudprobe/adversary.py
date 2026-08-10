@@ -231,11 +231,18 @@ def _mutate_llm(row: pd.Series, rng, strategy: str, model: str) -> tuple[pd.Data
 
     try:
         resp = ollama.generate(model=model, prompt=prompt)
-    except ConnectionError:
-        # The ollama client wraps httpx.ConnectError (server not running) as this.
-        return _RULES[strategy](row, rng), False, "connection_error"
     except httpx.TimeoutException:
         return _RULES[strategy](row, rng), False, "timeout"
+    except (httpx.ConnectError, ConnectionError):
+        # The ollama client raises httpx.ConnectError when the server isn't
+        # running — NOT Python's builtin ConnectionError (httpx.ConnectError
+        # is not a subclass of it). Catch both explicitly: this is the single
+        # most likely failure mode in a long overnight run, and getting it
+        # mislabelled as "other" would corrupt the fallback-reason breakdown
+        # that's reported as a result (REVIEW.md item 5). httpx.TimeoutException
+        # is caught first since it and ConnectError are unrelated siblings
+        # under httpx.TransportError.
+        return _RULES[strategy](row, rng), False, "connection_error"
     except Exception:
         return _RULES[strategy](row, rng), False, "other"
 

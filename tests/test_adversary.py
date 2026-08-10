@@ -53,6 +53,26 @@ def test_llm_connection_error_is_categorised(monkeypatch, seed_frauds):
     assert not frame.empty
 
 
+def test_llm_httpx_connect_error_is_categorised_as_connection_error(monkeypatch, seed_frauds):
+    """REVIEW.md item 5: the real ollama client raises httpx.ConnectError when
+    the server isn't running — NOT Python's builtin ConnectionError (confirmed:
+    httpx.ConnectError is not a subclass of it). Before the fix this fell
+    through to `except Exception` and was mislabelled 'other', corrupting the
+    fallback-reason breakdown for the most likely overnight-run failure mode.
+    """
+    ollama = pytest.importorskip("ollama")
+    httpx = pytest.importorskip("httpx")
+
+    def boom(**kwargs):
+        raise httpx.ConnectError("All connection attempts failed")
+
+    monkeypatch.setattr(ollama, "generate", boom)
+    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    assert used_llm is False
+    assert reason == "connection_error"
+    assert not frame.empty
+
+
 def test_llm_timeout_is_categorised(monkeypatch, seed_frauds):
     ollama = pytest.importorskip("ollama")
     httpx = pytest.importorskip("httpx")
