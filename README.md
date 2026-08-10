@@ -152,13 +152,24 @@ number in a report is measured, not assumed. So far:
   distinct seeds and writes `results_aggregate.json`: means with 95% CIs, a paired
   test (t-test + Wilcoxon fallback, Cohen's d_z) of clean vs. adversarial
   detection, and Wilson confidence intervals per strategy (flagged when the pooled
-  sample is small, never silently presented as precise).
+  sample is small, never silently presented as precise). When `--out` is set, each
+  individual run's artefacts (corpus, report, `results.json`, and — with
+  `--figures` — its own figures/tables/manifest, including SHAP) land under
+  `out/runs/seed_<n>/` so any one run can be inspected on its own.
 - **Rules vs. LLM at scale** — `--compare` attacks the *same* trained model and
   *identical* seed frauds with both backends and reports a paired comparison:
   mean evasion per backend, the difference with a 95% CI, and a significance test
   — isolating what the LLM specifically contributes over a heuristic. LLM calls
   run ~8-25s each depending on load; progress and an ETA are logged periodically,
   and total/mean/min/max call latency land in `results.json`.
+- **Report-ready artefacts** — `--figures` writes 300 dpi PNG + vector PDF to
+  `out/figures/` (PR/ROC curves, confusion matrices, per-strategy evasion with
+  Wilson CIs, the threshold sweep, SHAP summary, and evasion levers), CSV tables
+  to `out/results_tables/`, and `out/MANIFEST.json` (package/Python/OS/CPU/RAM,
+  Ollama model, git commit, seed(s), wall-clock, full CLI
+  invocation) — for single runs, `--compare`, and `--n-runs` alike, so the exact
+  runs cited in a report all produce the same artefacts, generated rather than
+  screenshotted.
 
 ## Research context
 

@@ -46,12 +46,19 @@ def test_run_repeated_writes_aggregate_json(tmp_path):
     assert data["n_runs_completed"] == 3
 
 
-def test_run_repeated_does_not_write_per_run_artefacts(tmp_path):
+def test_run_repeated_writes_per_run_artefacts_under_runs_subdir(tmp_path):
+    # REVIEW item 3: individual runs are inspectable, but must not clutter the
+    # top-level outdir — only results_aggregate.json (and, with --figures,
+    # aggregate figures/tables/manifest) belong there.
     cfg = _fast_cfg(tmp_path)
     run_repeated(cfg, n_runs=3)
-    # Only the aggregate should land in outdir — no per-run adversarial_corpus.csv.
     assert not (tmp_path / "adversarial_corpus.csv").exists()
     assert not (tmp_path / "report.txt").exists()
+    for seed in (100, 101, 102):
+        run_dir = tmp_path / "runs" / f"seed_{seed}"
+        assert (run_dir / "adversarial_corpus.csv").exists()
+        assert (run_dir / "report.txt").exists()
+        assert (run_dir / "results.json").exists()
 
 
 def test_run_repeated_includes_paired_significance_and_wilson_ci(tmp_path):

@@ -42,6 +42,7 @@ def cmd_run(args) -> int:
         out=args.out,
         seed=args.seed,
         explain=not args.no_explain,
+        figures=args.figures,
         log=lambda m: print(f"[fraudprobe] {m}"),
     )
     try:
@@ -78,6 +79,10 @@ def cmd_run(args) -> int:
             print("\n" + format_aggregate_report(result) + "\n")
             if args.out:
                 print(f"[fraudprobe] Aggregate written to {args.out}/results_aggregate.json")
+                if args.figures:
+                    print(f"[fraudprobe] Aggregate figures/tables/manifest written to {args.out}/ "
+                          f"(figures/, results_tables/, MANIFEST.json); per-run artefacts under "
+                          f"{args.out}/runs/seed_<n>/")
             return 0
         result = run_probe(cfg)
     except LLMRequiredError as exc:
@@ -153,6 +158,13 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--seed", type=int, default=42)
     r.add_argument("--no-explain", action="store_true",
                    help="Skip the SHAP evasion attribution.")
+    r.add_argument("--figures", action="store_true",
+                   help="Write 300dpi PNG + PDF figures to out/figures/ (PR/ROC curves, "
+                        "confusion matrices, per-strategy evasion with CIs, threshold sweep, "
+                        "SHAP summary and evasion levers), CSV tables to out/results_tables/, "
+                        "and out/MANIFEST.json (versions, seeds, timings, git commit, CLI "
+                        "invocation) — report-ready artefacts excluded from a dissertation's "
+                        "word count, generated properly rather than screenshotted.")
     r.add_argument("--n-runs", type=int, default=1,
                    help="Repeat the full pipeline across this many distinct seeds "
                         "(seed, seed+1, ..., seed+n-1) and write results_aggregate.json "

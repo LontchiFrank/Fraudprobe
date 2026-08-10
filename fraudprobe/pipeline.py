@@ -7,6 +7,7 @@ dict and (optionally) writes the reproducibility artefacts to disk.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from . import __version__
 from .adversary import STRATEGIES, LLMRequiredError, generate_adversarial_corpus
 from .data import load_paysim, make_demo_data
 from .explain import explain_evasion
+from .figures import generate_aggregate_figures, generate_all_figures
+from .manifest import write_manifest, write_results_tables
 from .models import ScoredModel, train_baseline, write_json
 from .stats import mean_std_ci95, paired_test, wilson_ci
 from .stress import format_report, rank_weaknesses, stress_test
@@ -42,6 +45,7 @@ class ProbeConfig:
     out: str | None = "fraudprobe_out"
     seed: int = 42
     explain: bool = True                # run SHAP attribution
+    figures: bool = False               # write PNG+PDF figures, results_tables/*.csv, MANIFEST.json
     log: object = print                 # progress callback
 
     def _emit(self, msg: str) -> None:
@@ -84,6 +88,7 @@ def _sample_evading_rows(model: ScoredModel, corpus: pd.DataFrame, per_strategy:
 
 def run_probe(cfg: ProbeConfig) -> dict:
     """Execute the pipeline and return a structured, JSON-serialisable result."""
+    t_start = time.perf_counter()
     outdir = Path(cfg.out) if cfg.out else None
     if outdir:
         outdir.mkdir(parents=True, exist_ok=True)
@@ -115,14 +120,26 @@ def run_probe(cfg: ProbeConfig) -> dict:
         **variant,
     }
 
+    clean_result = {k: v for k, v in result.items() if not k.startswith("_")}
+
     if outdir:
         variant["_corpus"].to_csv(outdir / "adversarial_corpus.csv", index=False)
         (outdir / "report.txt").write_text(variant["report_text"])
-        write_json({k: v for k, v in result.items() if not k.startswith("_")},
-                   outdir / "results.json")
+        write_json(clean_result, outdir / "results.json")
         cfg._emit(f"Artefacts written to {outdir}/")
 
-    return {k: v for k, v in result.items() if not k.startswith("_")}
+        if cfg.figures:
+            generate_all_figures(
+                model, clean_test, clean_fraud, variant["_corpus"],
+                variant["stress"], variant.get("explanation"),
+                outdir / "figures", log=cfg._emit,
+            )
+            written_tables = write_results_tables(clean_result, outdir / "results_tables")
+            cfg._emit(f"Results tables written to {outdir}/results_tables/ ({len(written_tables)} files).")
+            write_manifest(clean_result, outdir, time.perf_counter() - t_start)
+            cfg._emit(f"Manifest written to {outdir}/MANIFEST.json")
+
+    return clean_result
 
 
 def _paired_backend_comparison(model: ScoredModel, corpora: dict[str, pd.DataFrame]) -> dict | None:
@@ -174,6 +191,7 @@ def run_comparison(cfg: ProbeConfig, backends=("rules", "llm")) -> dict:
     mutated* (deterministic rules vs a local LLM). See _paired_backend_comparison
     for the statistical test this enables (Task 10).
     """
+    t_start = time.perf_counter()
     outdir = Path(cfg.out) if cfg.out else None
     if outdir:
         outdir.mkdir(parents=True, exist_ok=True)
@@ -198,6 +216,11 @@ def run_comparison(cfg: ProbeConfig, backends=("rules", "llm")) -> dict:
             continue
         if outdir and "_corpus" in v:
             v["_corpus"].to_csv(outdir / f"adversarial_corpus_{backend}.csv", index=False)
+            if cfg.figures:
+                generate_all_figures(
+                    model, clean_test, clean_fraud, v["_corpus"], v["stress"],
+                    v.get("explanation"), outdir / f"figures_{backend}", log=cfg._emit,
+                )
         corpora[backend] = v["_corpus"]
         variants.append({
             "backend": backend,
@@ -235,6 +258,11 @@ def run_comparison(cfg: ProbeConfig, backends=("rules", "llm")) -> dict:
     if outdir:
         write_json(result, outdir / "results.json")
         cfg._emit(f"Comparison artefacts written to {outdir}/")
+        if cfg.figures:
+            written_tables = write_results_tables(result, outdir / "results_tables")
+            cfg._emit(f"Results tables written to {outdir}/results_tables/ ({len(written_tables)} files).")
+            write_manifest(result, outdir, time.perf_counter() - t_start)
+            cfg._emit(f"Manifest written to {outdir}/MANIFEST.json")
     return result
 
 
@@ -244,14 +272,20 @@ def run_repeated(cfg: ProbeConfig, n_runs: int = 10) -> dict:
 
     A single run at a fixed seed cannot support the paired significance test or
     95% confidence intervals the methodology promises — this is what makes both
-    computable. Individual runs are not written to disk (their `out` is
-    suppressed); only the aggregate goes to results_aggregate.json.
+    computable. When `cfg.out` is set, each individual run's artefacts (corpus,
+    report, results.json, and — if `cfg.figures` — its own figures/tables/
+    manifest, including SHAP) are written under `out/runs/seed_<n>/` so a single
+    run can be inspected on its own; only the pooled statistics go to
+    `results_aggregate.json` at the top level.
     """
+    t_start = time.perf_counter()
     outdir = Path(cfg.out) if cfg.out else None
 
     per_run = []
     for i in range(n_runs):
-        run_cfg = replace(cfg, seed=cfg.seed + i, out=None)
+        run_seed = cfg.seed + i
+        run_out = str(outdir / "runs" / f"seed_{run_seed}") if outdir else None
+        run_cfg = replace(cfg, seed=run_seed, out=run_out)
         cfg._emit(f"--- Run {i + 1}/{n_runs} (seed={run_cfg.seed}) ---")
         try:
             per_run.append(run_probe(run_cfg))
@@ -322,6 +356,13 @@ def run_repeated(cfg: ProbeConfig, n_runs: int = 10) -> dict:
         outdir.mkdir(parents=True, exist_ok=True)
         write_json(result, outdir / "results_aggregate.json")
         cfg._emit(f"Aggregate results written to {outdir}/results_aggregate.json")
+
+        if cfg.figures:
+            generate_aggregate_figures(result, outdir / "figures", log=cfg._emit)
+            written_tables = write_results_tables(result, outdir / "results_tables")
+            cfg._emit(f"Aggregate results tables written to {outdir}/results_tables/ ({len(written_tables)} files).")
+            write_manifest(result, outdir, time.perf_counter() - t_start)
+            cfg._emit(f"Manifest written to {outdir}/MANIFEST.json")
 
     return result
 
