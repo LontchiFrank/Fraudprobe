@@ -162,6 +162,22 @@ number in a report is measured, not assumed. So far:
   — isolating what the LLM specifically contributes over a heuristic. LLM calls
   run ~8-25s each depending on load; progress and an ETA are logged periodically,
   and total/mean/min/max call latency land in `results.json`.
+- **Transaction velocity / destination behaviour** — `FEATURE_COLUMNS` now
+  includes `txn_velocity_orig` (backward-looking rolling count of same-`nameOrig`
+  transactions within a 24-step window) and `dest_txn_count` (total transactions
+  received by `nameDest`), computed strictly from whatever frame `engineer_features`
+  is given — never joined against an external history table, so it stays a pure,
+  reapply-to-mutated-rows-unchanged function (see its docstring for the full design
+  rationale). Concrete consequence: scored against the adversarial corpus alone
+  (not the full clean population), `amount_split`'s `AMOUNT_SPLIT_PARTS` sibling
+  rows genuinely earn a velocity count > 1 — a real structuring signal — while
+  single-row strategies see 1 regardless. On `--demo` synthetic data both features
+  are degenerate (every row gets an independently random account ID, so the clean
+  population never has velocity > 1 and the features carry no training signal) —
+  flagged automatically as a fixture-dependency warning in every `--demo` run,
+  same treatment as `temporal_dispersion`'s existing warning. Real PaySim data does
+  have repeat account IDs; any evasion-lever ranking involving these two features
+  must be re-measured there before citing it.
 - **Report-ready artefacts** — `--figures` writes 300 dpi PNG + vector PDF to
   `out/figures/` (PR/ROC curves, confusion matrices, per-strategy evasion with
   Wilson CIs, the threshold sweep, SHAP summary, and evasion levers), CSV tables

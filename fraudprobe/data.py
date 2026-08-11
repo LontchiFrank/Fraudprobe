@@ -159,11 +159,72 @@ def make_demo_data(n_rows: int = 60_000, fraud_rate: float = 0.013, seed: int = 
     return df.sample(frac=1.0, random_state=seed).reset_index(drop=True)
 
 
+# PaySim's `step` = 1 simulated hour. txn_velocity_orig counts same-nameOrig
+# transactions in the preceding VELOCITY_WINDOW_STEPS hours, backward-looking
+# only (never counting a later row) since a real-time fraud system can only
+# see past transactions when scoring a new one.
+VELOCITY_WINDOW_STEPS = 24
+
+
+def _rolling_txn_count(df: pd.DataFrame, account_col: str, window: int) -> np.ndarray:
+    """For each row, count rows sharing `account_col` whose `step` falls in
+    [step - window, step] — i.e. a backward-looking rolling velocity, computed
+    strictly from the rows present in `df` (see engineer_features docstring for
+    what that means when `df` is a small adversarial corpus rather than the
+    full dataset). Vectorized per account group via sorted-step searchsorted;
+    a Python loop only over the number of *distinct* accounts, not rows.
+    """
+    n = len(df)
+    if n == 0:
+        return np.zeros(0, dtype=np.int32)
+    steps = df["step"].to_numpy()
+    accounts = df[account_col].to_numpy()
+    result = np.empty(n, dtype=np.int32)
+    order = np.argsort(accounts, kind="stable")
+    sorted_accounts = accounts[order]
+    sorted_steps = steps[order]
+    boundaries = np.flatnonzero(np.r_[True, sorted_accounts[1:] != sorted_accounts[:-1], True])
+    for start, end in zip(boundaries[:-1], boundaries[1:]):
+        group_steps = sorted_steps[start:end]
+        step_order = np.argsort(group_steps, kind="stable")
+        gs = group_steps[step_order]
+        lo = np.searchsorted(gs, gs - window, side="left")
+        hi = np.searchsorted(gs, gs, side="right")  # inclusive of self and same-step ties
+        counts = (hi - lo).astype(np.int32)
+        result[order[start:end][step_order]] = counts
+    return result
+
+
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     """Derive the behavioural features the baseline classifier trains on.
 
-    Returns a new frame with FEATURE_COLUMNS present. Deterministic and
-    row-independent, so it can be reapplied to mutated rows unchanged.
+    Returns a new frame with FEATURE_COLUMNS present. Deterministic and a pure
+    function of `df` alone — no external state or transaction-history lookup —
+    so it can be reapplied to mutated rows unchanged. This matters for
+    `txn_velocity_orig`/`dest_txn_count` (Task 12) specifically: they are
+    counted *only among the rows present in `df` itself*, never joined against
+    a separate history table. Two consequences of that design choice, recorded
+    here rather than left implicit:
+
+    1. Called on the full clean dataset (training, or `clean_test` at score
+       time), both features reflect genuine population-level history, since
+       every real transaction that account made within the loaded data is
+       present in `df`.
+    2. Called on a small adversarial corpus alone (stress_test's `model.
+       score_rows(corpus)`, SHAP's per-row attribution, etc.) — which is every
+       call site except the clean-side ones — the account's real prior history
+       from `clean_test` is *not* in `df`, so these features can only see the
+       corpus's own sibling rows. Concretely: `amount_split` turns one seed
+       transaction into `AMOUNT_SPLIT_PARTS` rows sharing the same `nameOrig`,
+       `nameDest`, and `step`, so those rows genuinely earn a velocity count of
+       `AMOUNT_SPLIT_PARTS` — a real structuring signal, not an artefact.
+       `temporal_dispersion` and `balance_camouflage` each produce exactly one
+       row per seed, so they see a velocity of 1 regardless of window size.
+       A history-joined implementation was considered and rejected: it would
+       require `ScoredModel` to carry the training population everywhere it's
+       scored, breaking the "reapply to mutated rows unchanged" contract this
+       docstring already promises and that Task 2's cross-backend row-count
+       comparison depends on.
     """
     out = df.copy()
 
@@ -180,6 +241,10 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     out["dest_was_empty"] = (out["oldbalanceDest"] <= 0.01).astype(int)
     out["hour_of_day"] = out["step"] % 24
     out["log_amount"] = np.log1p(out["amount"].clip(lower=0))
+
+    # Task 12: transaction velocity / destination behavioural consistency.
+    out["txn_velocity_orig"] = _rolling_txn_count(out, "nameOrig", VELOCITY_WINDOW_STEPS)
+    out["dest_txn_count"] = out.groupby("nameDest")["nameDest"].transform("count").astype(np.int32)
 
     for t in TXN_TYPES:
         out[f"type_{t}"] = (out["type"] == t).astype(int)
@@ -202,4 +267,6 @@ FEATURE_COLUMNS = [
     "orig_emptied",
     "dest_was_empty",
     "hour_of_day",
+    "txn_velocity_orig",
+    "dest_txn_count",
 ] + [f"type_{t}" for t in TXN_TYPES]

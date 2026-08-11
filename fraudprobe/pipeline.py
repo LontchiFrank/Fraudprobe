@@ -442,6 +442,17 @@ def _fixture_warnings(strategies: tuple[str, ...], data_source: str) -> list[str
             "property of real fraud. Re-run against real PaySim data before citing this "
             "number."
         )
+    if data_source.startswith("synthetic:"):
+        warnings.append(
+            "txn_velocity_orig/dest_txn_count (Task 12) are structurally degenerate on "
+            "synthetic demo data: make_demo_data assigns every row an independently "
+            "random nameOrig/nameDest with no repeat-customer structure, so both "
+            "features equal 1 for the entire clean population (legit and fraud alike) "
+            "and carry zero training signal. Real PaySim's account IDs do repeat across "
+            "transactions. Any evasion-lever ranking or drop-off attributed to these two "
+            "features is an artefact of --demo and must be re-measured against real "
+            "PaySim data before citing it."
+        )
     return warnings
 
 
