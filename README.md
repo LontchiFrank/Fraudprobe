@@ -135,7 +135,11 @@ number in a report is measured, not assumed. So far:
 - **Real data path** — `load_paysim` downcasts numeric dtypes so the full 6.36M-row
   PaySim CSV loads in ~1.3GB without chunking. `--sample-legit N` keeps every fraud
   row plus a stratified sample of legitimate ones; every run (synthetic or real)
-  reports `n_rows`/`observed_fraud_rate` so the two are never confused.
+  reports `n_rows`/`observed_fraud_rate` so the two are never confused. The CLI's
+  `--demo` mode defaults `--demo-fraud-rate` to `0.00129` (real PaySim's observed
+  rate) rather than `make_demo_data`'s own `0.013` library default — a demo run an
+  order of magnitude easier than the real problem is what produced the original
+  validity gap this brief exists to fix.
 - **Tuned baseline** — hyperparameters are selected via stratified 5-fold grid
   search with SMOTE fit *inside* each fold (never on validation data), then refit
   once on the full training partition. `results.json`'s `baseline.tuning` records

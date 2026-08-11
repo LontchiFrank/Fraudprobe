@@ -27,6 +27,7 @@ def cmd_run(args) -> int:
         data=args.data,
         demo=bool(args.demo or not args.data),
         demo_rows=args.demo_rows,
+        demo_fraud_rate=args.demo_fraud_rate,
         sample_legit=args.sample_legit,
         model=args.model,
         model_type=args.model_type,
@@ -120,6 +121,13 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--data", type=str, default=None, help="Path to PaySim-shaped CSV.")
     r.add_argument("--demo", action="store_true", help="Use built-in synthetic data.")
     r.add_argument("--demo-rows", type=int, default=60_000)
+    r.add_argument("--demo-fraud-rate", type=float, default=0.00129,
+                   help="Fraud prevalence for --demo synthetic data (default 0.00129, "
+                        "matching real PaySim's observed ~0.129%% rate). The library "
+                        "default (make_demo_data's own, used by direct API callers) "
+                        "stays 0.013 for backward compatibility; only the CLI's default "
+                        "changed, since a demo run an order of magnitude easier than the "
+                        "real problem is what produced the original validity gap.")
     r.add_argument("--sample-legit", type=int, default=None,
                    help="Real PaySim only (--data): keep every fraud row plus a stratified "
                         "random sample of this many legitimate rows, instead of all ~6.36M. "

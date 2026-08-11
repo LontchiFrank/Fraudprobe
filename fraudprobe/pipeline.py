@@ -30,6 +30,7 @@ class ProbeConfig:
     data: str | None = None
     demo: bool = True
     demo_rows: int = 60_000
+    demo_fraud_rate: float = 0.013      # make_demo_data's own default; CLI overrides to 0.00129
     sample_legit: int | None = None     # real PaySim only: keep all fraud + this many sampled legit rows
     model: str | None = None            # path to a user's fitted .joblib
     model_type: str = "auto"            # auto | xgboost | rf | gbdt
@@ -376,8 +377,12 @@ def _load_data(cfg: ProbeConfig):
                   + (f" (sampling {cfg.sample_legit} legit rows)" if cfg.sample_legit else ""))
         df = load_paysim(cfg.data, sample_legit=cfg.sample_legit, seed=cfg.seed)
         return df, f"paysim:{Path(cfg.data).name}"
-    cfg._emit("Using built-in synthetic (PaySim-shaped) demo data.")
-    return make_demo_data(n_rows=cfg.demo_rows, seed=cfg.seed), f"synthetic:{cfg.demo_rows}rows"
+    cfg._emit(f"Using built-in synthetic (PaySim-shaped) demo data "
+              f"(fraud_rate={cfg.demo_fraud_rate:.4%}).")
+    return (
+        make_demo_data(n_rows=cfg.demo_rows, fraud_rate=cfg.demo_fraud_rate, seed=cfg.seed),
+        f"synthetic:{cfg.demo_rows}rows",
+    )
 
 
 def _data_stats(df: pd.DataFrame) -> dict:
