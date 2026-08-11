@@ -105,8 +105,13 @@ def plot_evasion_bar_chart(stress: dict, outdir: Path) -> None:
         p = w["proportion"] or 0.0
         strategies.append(s)
         rates.append(p)
-        err_low.append(p - (w["ci95_low"] or p))
-        err_high.append((w["ci95_high"] or p) - p)
+        # max(0.0, ...): wilson_ci's own low/high are correct, but subtracting
+        # two independently-rounded floats at a boundary (e.g. p=0.0 exactly,
+        # ci95_low ~2.8e-17 instead of exactly 0.0) can yield a tiny negative
+        # that matplotlib's yerr rejects outright — REVIEW.md item 3 smoke test
+        # against real PaySim hit exactly this on a 0/6 temporal_dispersion cell.
+        err_low.append(max(0.0, p - (w["ci95_low"] or p)))
+        err_high.append(max(0.0, (w["ci95_high"] or p) - p))
 
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.bar(strategies, rates, yerr=[err_low, err_high], capsize=5, color="#c0392b")
@@ -227,8 +232,8 @@ def plot_aggregate_evasion_bar(per_strategy_wilson: dict, outdir: Path) -> None:
         hi = w["ci95_high"] if w.get("ci95_high") is not None else p
         strategies.append(s)
         rates.append(p)
-        err_low.append(p - lo)
-        err_high.append(hi - p)
+        err_low.append(max(0.0, p - lo))  # see plot_evasion_bar_chart for why
+        err_high.append(max(0.0, hi - p))
     if not strategies:
         return
 
@@ -255,8 +260,8 @@ def plot_aggregate_dropoff(aggregate_metrics: dict, outdir: Path) -> None:
     means = [clean["mean"], adv["mean"]]
     lows = [clean.get("ci95_low", means[0]), adv.get("ci95_low", means[1])]
     highs = [clean.get("ci95_high", means[0]), adv.get("ci95_high", means[1])]
-    err_low = [m - (lo if lo is not None else m) for m, lo in zip(means, lows)]
-    err_high = [(hi if hi is not None else m) - m for m, hi in zip(means, highs)]
+    err_low = [max(0.0, m - (lo if lo is not None else m)) for m, lo in zip(means, lows)]
+    err_high = [max(0.0, (hi if hi is not None else m) - m) for m, hi in zip(means, highs)]
 
     fig, ax = plt.subplots(figsize=(6, 5))
     ax.bar(labels, means, yerr=[err_low, err_high], capsize=5, color=["#2e7d32", "#c0392b"])
