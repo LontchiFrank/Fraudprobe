@@ -34,7 +34,7 @@ def _row(seed_frauds):
 # --------------------------------------------------------------------------- #
 def test_llm_import_error_is_categorised(monkeypatch, seed_frauds):
     monkeypatch.setitem(sys.modules, "ollama", None)
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    frame, used_llm, reason, retried = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
     assert used_llm is False
     assert reason == "import_error"
     assert not frame.empty  # still falls back to a usable row
@@ -47,7 +47,7 @@ def test_llm_connection_error_is_categorised(monkeypatch, seed_frauds):
         raise ConnectionError("Failed to connect to Ollama.")
 
     monkeypatch.setattr(ollama, "generate", boom)
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    frame, used_llm, reason, retried = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
     assert used_llm is False
     assert reason == "connection_error"
     assert not frame.empty
@@ -67,7 +67,7 @@ def test_llm_httpx_connect_error_is_categorised_as_connection_error(monkeypatch,
         raise httpx.ConnectError("All connection attempts failed")
 
     monkeypatch.setattr(ollama, "generate", boom)
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    frame, used_llm, reason, retried = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
     assert used_llm is False
     assert reason == "connection_error"
     assert not frame.empty
@@ -81,7 +81,7 @@ def test_llm_timeout_is_categorised(monkeypatch, seed_frauds):
         raise httpx.ReadTimeout("timed out")
 
     monkeypatch.setattr(ollama, "generate", boom)
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    frame, used_llm, reason, retried = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
     assert used_llm is False
     assert reason == "timeout"
 
@@ -89,7 +89,7 @@ def test_llm_timeout_is_categorised(monkeypatch, seed_frauds):
 def test_llm_json_parse_error_is_categorised(monkeypatch, seed_frauds):
     ollama = pytest.importorskip("ollama")
     monkeypatch.setattr(ollama, "generate", lambda **kw: {"response": "not json at all"})
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    frame, used_llm, reason, retried = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
     assert used_llm is False
     assert reason == "json_parse_error"
 
@@ -97,7 +97,7 @@ def test_llm_json_parse_error_is_categorised(monkeypatch, seed_frauds):
 def test_llm_schema_error_missing_required_field(monkeypatch, seed_frauds):
     ollama = pytest.importorskip("ollama")
     monkeypatch.setattr(ollama, "generate", lambda **kw: {"response": '{"step": 12}'})
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    frame, used_llm, reason, retried = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
     assert used_llm is False
     assert reason == "schema_error"
 
@@ -105,7 +105,7 @@ def test_llm_schema_error_missing_required_field(monkeypatch, seed_frauds):
 def test_llm_schema_error_non_numeric_field(monkeypatch, seed_frauds):
     ollama = pytest.importorskip("ollama")
     monkeypatch.setattr(ollama, "generate", lambda **kw: {"response": '{"amount": "a lot of money"}'})
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    frame, used_llm, reason, retried = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
     assert used_llm is False
     assert reason == "schema_error"
 
@@ -120,7 +120,7 @@ def test_llm_success(monkeypatch, seed_frauds):
         lambda **kw: {"response": 'Sure! {"amount": 4000.0, "oldbalanceOrg": 10000.0, '
                                    '"newbalanceOrig": 6000.0, "oldbalanceDest": 0.0, "newbalanceDest": 4000.0}'},
     )
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "balance_camouflage", "llama3")
+    frame, used_llm, reason, retried = _mutate_llm(_row(seed_frauds), _rng(), "balance_camouflage", "llama3")
     assert used_llm is True
     assert reason is None
     assert frame.iloc[0]["amount"] == 4000.0
@@ -133,7 +133,7 @@ def test_llm_unexpected_exception_is_other(monkeypatch, seed_frauds):
         raise RuntimeError("something unrelated broke")
 
     monkeypatch.setattr(ollama, "generate", boom)
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    frame, used_llm, reason, retried = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
     assert used_llm is False
     assert reason == "other"
 

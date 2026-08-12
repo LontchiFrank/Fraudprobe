@@ -205,34 +205,23 @@ def _llm_prompt(row: pd.Series, strategy: str) -> str:
     )
 
 
-def _mutate_llm(row: pd.Series, rng, strategy: str, model: str) -> tuple[pd.DataFrame, bool, str | None]:
-    """Ask a local Ollama model to perform the mutation.
-
-    Returns ``(frame, used_llm, reason)``. ``used_llm`` is True only if the model's
-    own output was used; on any failure the rules implementation is substituted so
-    the pipeline always gets a usable row, but the failure is never swallowed —
-    ``reason`` is always one of ``FALLBACK_REASONS`` when ``used_llm`` is False, and
-    None when it succeeded. Kept import-light so the package installs and runs
-    without ollama; that specific case is reported as ``import_error``.
-
-    ``amount_split`` returns multiple rows (one per proportion the model chose),
-    matching the rules backend's contract of one seed row -> one-or-more rows —
-    see _llm_prompt for why this is proportions, not finished rows (Task 2).
+def _call_ollama_and_parse(
+    row: pd.Series, strategy: str, model: str, prompt: str,
+) -> tuple[pd.DataFrame | None, str | None]:
+    """One Ollama call + response parse/validation. Returns ``(frame, None)`` on
+    success or ``(None, reason)`` on failure, ``reason`` always one of
+    ``FALLBACK_REASONS``. Never touches the rules fallback itself — that's
+    `_mutate_llm`'s job, so it can decide whether to retry first.
     """
-    try:
-        import json
+    import json
 
-        import httpx  # transitive dependency of ollama; import alongside it
-        import ollama  # type: ignore
-    except ImportError:
-        return _RULES[strategy](row, rng), False, "import_error"
-
-    prompt = _llm_prompt(row, strategy)
+    import httpx  # transitive dependency of ollama; import alongside it
+    import ollama  # type: ignore
 
     try:
         resp = ollama.generate(model=model, prompt=prompt)
     except httpx.TimeoutException:
-        return _RULES[strategy](row, rng), False, "timeout"
+        return None, "timeout"
     except (httpx.ConnectError, ConnectionError):
         # The ollama client raises httpx.ConnectError when the server isn't
         # running — NOT Python's builtin ConnectionError (httpx.ConnectError
@@ -242,44 +231,91 @@ def _mutate_llm(row: pd.Series, rng, strategy: str, model: str) -> tuple[pd.Data
         # that's reported as a result (REVIEW.md item 5). httpx.TimeoutException
         # is caught first since it and ConnectError are unrelated siblings
         # under httpx.TransportError.
-        return _RULES[strategy](row, rng), False, "connection_error"
+        return None, "connection_error"
     except Exception:
-        return _RULES[strategy](row, rng), False, "other"
+        return None, "other"
 
     try:
         text = resp["response"]
         payload = json.loads(text[text.index("{"): text.rindex("}") + 1])
     except (KeyError, ValueError):
         # No '{'/'}' found (.index/.rindex raise ValueError), or invalid JSON.
-        return _RULES[strategy](row, rng), False, "json_parse_error"
+        return None, "json_parse_error"
 
     if not isinstance(payload, dict):
-        return _RULES[strategy](row, rng), False, "schema_error"
+        return None, "schema_error"
 
     if strategy == "amount_split":
         proportions = payload.get("proportions")
         if not isinstance(proportions, list) or len(proportions) < 2:
-            return _RULES[strategy](row, rng), False, "schema_error"
+            return None, "schema_error"
         try:
             weights = [float(p) for p in proportions]
         except (TypeError, ValueError):
-            return _RULES[strategy](row, rng), False, "schema_error"
+            return None, "schema_error"
         if any(w <= 0 for w in weights):
-            return _RULES[strategy](row, rng), False, "schema_error"
-        return _split_amount(row, weights), True, None
+            return None, "schema_error"
+        return _split_amount(row, weights), None
 
     if not all(f in payload for f in _LLM_REQUIRED_FIELDS):
-        return _RULES[strategy](row, rng), False, "schema_error"
+        return None, "schema_error"
 
     try:
         r = row.copy()
         for k in _LLM_RESPONSE_FIELDS:
             if k in payload:
                 r[k] = float(payload[k])
-        return pd.DataFrame([r]), True, None
+        return pd.DataFrame([r]), None
     except (TypeError, ValueError):
         # A field was present but not coercible to float (e.g. a string label).
-        return _RULES[strategy](row, rng), False, "schema_error"
+        return None, "schema_error"
+
+
+def _mutate_llm(
+    row: pd.Series, rng, strategy: str, model: str,
+) -> tuple[pd.DataFrame, bool, str | None, bool]:
+    """Ask a local Ollama model to perform the mutation.
+
+    Returns ``(frame, used_llm, reason, retried)``. ``used_llm`` is True only if
+    the model's own output was used; on any failure the rules implementation is
+    substituted so the pipeline always gets a usable row, but the failure is
+    never swallowed — ``reason`` is always one of ``FALLBACK_REASONS`` when
+    ``used_llm`` is False, and None when it succeeded. Kept import-light so the
+    package installs and runs without ollama; that specific case is reported as
+    ``import_error``.
+
+    ``retried`` is True iff a ``schema_error`` on the first attempt triggered
+    exactly one same-prompt retry — regardless of whether that retry then
+    succeeded. Scoped to ``schema_error`` only (not ``json_parse_error`` or the
+    transport failures): a validated real-PaySim run measured llama3 hitting
+    schema_error on roughly 1 in 13 calls, at a scale (hundreds of calls per
+    run) where that's a near-certainty to occur at least once, but a
+    same-prompt retry is pointless for e.g. connection_error (the server being
+    down doesn't fix itself on the next call). This lets a caller compute both
+    a single-shot success rate (would the model get it right first try) and a
+    with-retry success rate (does one free retry rescue most of the misses)
+    without conflating the two.
+
+    ``amount_split`` returns multiple rows (one per proportion the model chose),
+    matching the rules backend's contract of one seed row -> one-or-more rows —
+    see _llm_prompt for why this is proportions, not finished rows (Task 2).
+    """
+    try:
+        import ollama  # noqa: F401  — import-only probe; _call_ollama_and_parse does the real import
+    except ImportError:
+        return _RULES[strategy](row, rng), False, "import_error", False
+
+    prompt = _llm_prompt(row, strategy)
+    frame, reason = _call_ollama_and_parse(row, strategy, model, prompt)
+    if frame is not None:
+        return frame, True, None, False
+    if reason != "schema_error":
+        return _RULES[strategy](row, rng), False, reason, False
+
+    frame, reason = _call_ollama_and_parse(row, strategy, model, prompt)
+    if frame is not None:
+        return frame, True, None, True
+    return _RULES[strategy](row, rng), False, reason, True
 
 
 # --------------------------------------------------------------------------- #
@@ -299,6 +335,15 @@ class AdversaryReport:
     n_llm_fallback: int = 0
     llm_success_rate: float | None = None
     fallback_reasons: dict[str, int] = field(default_factory=dict)
+    # Schema-error retry (same prompt, one retry, schema_error only — see
+    # _mutate_llm's docstring for why). n_llm_success above already counts a
+    # recovered retry as a success ("with-retry" rate); these let a caller
+    # recover the "single-shot" rate too: n_llm_first_attempt_success /
+    # n_llm_attempted, vs. n_llm_success / n_llm_attempted for with-retry.
+    n_llm_first_attempt_success: int = 0
+    n_llm_retried: int = 0
+    n_llm_retry_success: int = 0
+    llm_single_shot_success_rate: float | None = None
     # Economic validation (Task 3).
     validation_mode: str = "strict"
     rejection_reasons: dict[str, int] = field(default_factory=dict)
@@ -366,6 +411,7 @@ def generate_adversarial_corpus(
     rng = np.random.default_rng(seed)
     generated, rejected = [], 0
     n_llm_attempted = n_llm_success = 0
+    n_llm_first_attempt_success = n_llm_retried = n_llm_retry_success = 0
     fallback_reasons: dict[str, int] = {}
     rejection_reasons: dict[str, int] = {}
     n_rejected_low_value = 0
@@ -378,7 +424,7 @@ def generate_adversarial_corpus(
             if backend == "llm":
                 n_llm_attempted += 1
                 t0 = time.perf_counter()
-                muts, used_llm, reason = _mutate_llm(row, rng, strat, llm_model)
+                muts, used_llm, reason, retried = _mutate_llm(row, rng, strat, llm_model)
                 llm_call_latencies.append(time.perf_counter() - t0)
                 if n_llm_attempted % 10 == 0 or n_llm_attempted == total_llm_calls_planned:
                     mean_lat = sum(llm_call_latencies) / len(llm_call_latencies)
@@ -386,8 +432,14 @@ def generate_adversarial_corpus(
                     eta = remaining * mean_lat
                     log(f"LLM call {n_llm_attempted}/{total_llm_calls_planned} "
                         f"(mean {mean_lat:.1f}s/call, ETA {eta/60:.1f} min)")
+                if retried:
+                    n_llm_retried += 1
                 if used_llm:
                     n_llm_success += 1
+                    if retried:
+                        n_llm_retry_success += 1
+                    else:
+                        n_llm_first_attempt_success += 1
                     source = "llm"
                 else:
                     fallback_reasons[reason] = fallback_reasons.get(reason, 0) + 1
@@ -460,6 +512,12 @@ def generate_adversarial_corpus(
         n_llm_success=n_llm_success,
         n_llm_fallback=n_llm_fallback,
         llm_success_rate=(n_llm_success / n_llm_attempted) if n_llm_attempted else None,
+        n_llm_first_attempt_success=n_llm_first_attempt_success,
+        n_llm_retried=n_llm_retried,
+        n_llm_retry_success=n_llm_retry_success,
+        llm_single_shot_success_rate=(
+            (n_llm_first_attempt_success / n_llm_attempted) if n_llm_attempted else None
+        ),
         fallback_reasons=fallback_reasons,
         validation_mode=validation,
         rejection_reasons=rejection_reasons,

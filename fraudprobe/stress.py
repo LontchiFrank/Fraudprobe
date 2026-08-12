@@ -153,7 +153,14 @@ def format_report(baseline: dict, stress: dict, adv_report) -> str:
     if adv_report.n_llm_attempted:
         rate = adv_report.llm_success_rate or 0.0
         add(f"  LLM success rate       : {rate*100:5.1f}% "
-            f"({adv_report.n_llm_success}/{adv_report.n_llm_attempted} calls)")
+            f"({adv_report.n_llm_success}/{adv_report.n_llm_attempted} calls, with one "
+            f"same-prompt retry on schema_error)")
+        if adv_report.n_llm_retried:
+            single_rate = adv_report.llm_single_shot_success_rate or 0.0
+            add(f"  LLM single-shot rate   : {single_rate*100:5.1f}% "
+                f"({adv_report.n_llm_first_attempt_success}/{adv_report.n_llm_attempted} calls, "
+                f"before any retry) — {adv_report.n_llm_retried} calls needed a retry, "
+                f"{adv_report.n_llm_retry_success} of those recovered")
         if adv_report.fallback_reasons:
             reasons = ", ".join(
                 f"{k}={v}" for k, v in sorted(adv_report.fallback_reasons.items(), key=lambda kv: -kv[1])
@@ -175,6 +182,17 @@ def format_report(baseline: dict, stress: dict, adv_report) -> str:
     for strat, ev in rank_weaknesses(stress):
         bar = "#" * int(ev * 40)
         add(f"    {strat:22s} {ev*100:5.1f}% evaded  {bar}")
+
+    llm_only = stress.get("per_strategy_llm_only", {})
+    if llm_only:
+        add("")
+        add("  Same breakdown, source == 'llm' rows only (excludes rules and")
+        add("  rules_fallback rows — the pure-LLM result, without --require-llm")
+        add("  gambling the whole run on zero schema errors):")
+        for strat, vals in sorted(llm_only.items(), key=lambda kv: -kv[1]["evasion_rate"]):
+            bar = "#" * int(vals["evasion_rate"] * 40)
+            add(f"    {strat:22s} {vals['evasion_rate']*100:5.1f}% evaded  "
+                f"(n={vals['n']})  {bar}")
 
     sweep = stress.get("threshold_sweep", {})
     if sweep.get("fixed_fpr"):

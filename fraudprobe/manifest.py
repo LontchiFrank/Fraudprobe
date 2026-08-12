@@ -180,6 +180,16 @@ def write_results_tables(result: dict, outdir: Path) -> list[str]:
                 f"per_strategy_evasion{suffix}",
             )
 
+        # Restricted to source == "llm" rows — the pure-LLM result --require-llm
+        # was meant to guarantee, reported alongside the all-rows table rather
+        # than only measurable by aborting the run on any rules fallback.
+        per_strategy_llm_only = stress.get("per_strategy_llm_only", {})
+        if per_strategy_llm_only:
+            _write(
+                pd.DataFrame([{"strategy": k, **vals} for k, vals in per_strategy_llm_only.items()]),
+                f"per_strategy_evasion_llm_only{suffix}",
+            )
+
         sweep = stress.get("threshold_sweep", {})
         if sweep.get("grid"):
             _write(pd.DataFrame(sweep["grid"]), f"threshold_sweep{suffix}")
@@ -207,6 +217,7 @@ def write_results_tables(result: dict, outdir: Path) -> list[str]:
         for key, label in [
             ("aggregate_metrics", "aggregate_metrics"),
             ("per_strategy_wilson_ci", "per_strategy_wilson_ci"),
+            ("per_strategy_wilson_ci_llm_only", "per_strategy_wilson_ci_llm_only"),
         ]:
             data = result.get(key, {})
             if data:

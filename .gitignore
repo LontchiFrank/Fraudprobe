@@ -7,3 +7,6 @@ fraudprobe_out*/
 *.joblib
 .venv*/
 .DS_Store
+data/
+results/
+run_reportable.log

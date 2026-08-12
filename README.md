@@ -120,7 +120,19 @@ number in a report is measured, not assumed. So far:
   or `source=rules`, and the corpus/`results.json` report `llm_success_rate` and a
   breakdown of *why* any call fell back (`connection_error`, `timeout`,
   `json_parse_error`, `schema_error`, ...). `--require-llm` aborts instead of
-  silently degrading to rules, for headline results that must be pure-LLM.
+  silently degrading to rules, for headline results that must be pure-LLM — but
+  measured against a real llama3 server at PaySim scale (hundreds of calls per
+  run), a ~1-in-13 `schema_error` rate makes surviving a whole run with zero
+  failures a near-certainty *not* to happen, so `--require-llm` is not what the
+  reportable run set actually uses (see below). On a `schema_error` specifically
+  (not other failure modes — retrying a dead connection is pointless), one
+  same-prompt retry is attempted; `n_llm_retried`/`n_llm_retry_success` and
+  `llm_single_shot_success_rate` (before any retry) vs. `llm_success_rate`
+  (with retry) are both recorded, so neither number is lost to the other.
+  `results.json`'s `stress.per_strategy_llm_only` (and `--n-runs`'s
+  `per_strategy_wilson_ci_llm_only`) recompute per-strategy evasion restricted
+  to genuinely `source=="llm"` rows — the pure-LLM number `--require-llm` was
+  meant to guarantee, obtained without gambling an entire run on it.
 - **Matched interventions** — `amount_split` produces the same number of rows under
   both backends (the LLM proposes *proportions*, Python always does the balance
   arithmetic), so per-strategy evasion is comparable across rules vs. LLM.

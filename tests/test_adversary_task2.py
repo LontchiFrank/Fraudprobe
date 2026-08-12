@@ -70,7 +70,7 @@ def test_split_amount_all_rows_economically_valid(seed_frauds):
 # --------------------------------------------------------------------------- #
 def test_llm_amount_split_success_returns_multiple_rows(monkeypatch, seed_frauds):
     _mock_proportions_response(monkeypatch, [0.5, 0.3, 0.2])
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    frame, used_llm, reason, retried = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
     assert used_llm is True
     assert reason is None
     assert len(frame) == 3
@@ -80,14 +80,14 @@ def test_llm_amount_split_success_returns_multiple_rows(monkeypatch, seed_frauds
 def test_llm_amount_split_missing_proportions_is_schema_error(monkeypatch, seed_frauds):
     ollama = pytest.importorskip("ollama")
     monkeypatch.setattr(ollama, "generate", lambda **kw: {"response": '{"amount": 999.0}'})
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    frame, used_llm, reason, retried = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
     assert used_llm is False
     assert reason == "schema_error"
 
 
 def test_llm_amount_split_too_few_proportions_is_schema_error(monkeypatch, seed_frauds):
     _mock_proportions_response(monkeypatch, [1.0])
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    frame, used_llm, reason, retried = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
     assert used_llm is False
     assert reason == "schema_error"
 
@@ -95,14 +95,14 @@ def test_llm_amount_split_too_few_proportions_is_schema_error(monkeypatch, seed_
 def test_llm_amount_split_non_numeric_proportions_is_schema_error(monkeypatch, seed_frauds):
     ollama = pytest.importorskip("ollama")
     monkeypatch.setattr(ollama, "generate", lambda **kw: {"response": '{"proportions": ["a", "b"]}'})
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    frame, used_llm, reason, retried = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
     assert used_llm is False
     assert reason == "schema_error"
 
 
 def test_llm_amount_split_negative_proportion_is_schema_error(monkeypatch, seed_frauds):
     _mock_proportions_response(monkeypatch, [0.5, -0.3, 0.2])
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    frame, used_llm, reason, retried = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
     assert used_llm is False
     assert reason == "schema_error"
 
@@ -111,7 +111,7 @@ def test_llm_amount_split_fallback_still_yields_rules_row_count(monkeypatch, see
     """Even when the LLM fails, the fallback keeps amount_split's multi-row shape."""
     ollama = pytest.importorskip("ollama")
     monkeypatch.setattr(ollama, "generate", lambda **kw: {"response": '{"amount": 999.0}'})
-    frame, used_llm, reason = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
+    frame, used_llm, reason, retried = _mutate_llm(_row(seed_frauds), _rng(), "amount_split", "llama3")
     assert used_llm is False
     assert len(frame) == AMOUNT_SPLIT_PARTS
 

@@ -7,6 +7,7 @@ dict and (optionally) writes the reproducibility artefacts to disk.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -267,6 +268,20 @@ def run_comparison(cfg: ProbeConfig, backends=("rules", "llm")) -> dict:
     return result
 
 
+def _pool_per_strategy_wilson(per_run: list[dict], key: str) -> dict:
+    """Pool per-strategy evasion counts across runs and compute one Wilson CI
+    per strategy. `key` is "per_strategy" (all rows) or "per_strategy_llm_only"
+    (source == "llm" rows only) — both live on stress_test's return dict.
+    """
+    pools: dict[str, dict[str, int]] = {}
+    for r in per_run:
+        for strat, s in r["stress"].get(key, {}).items():
+            pool = pools.setdefault(strat, {"n": 0, "evaded": 0})
+            pool["n"] += s["n"]
+            pool["evaded"] += round(s["evasion_rate"] * s["n"])
+    return {strat: wilson_ci(pool["evaded"], pool["n"]) for strat, pool in pools.items()}
+
+
 def run_repeated(cfg: ProbeConfig, n_runs: int = 10) -> dict:
     """Task 9: re-run the full single-backend pipeline across n_runs distinct
     seeds (cfg.seed, cfg.seed+1, ..., cfg.seed+n_runs-1) and aggregate.
@@ -278,6 +293,13 @@ def run_repeated(cfg: ProbeConfig, n_runs: int = 10) -> dict:
     manifest, including SHAP) are written under `out/runs/seed_<n>/` so a single
     run can be inspected on its own; only the pooled statistics go to
     `results_aggregate.json` at the top level.
+
+    Resumable: before running seed N, if `out/runs/seed_<N>/results.json`
+    already exists, it's loaded from disk instead of recomputed. A long
+    LLM-backend --n-runs invocation that crashes or is killed partway through
+    can simply be re-invoked with the same --out and picks up from the first
+    incomplete seed, rather than losing every already-finished repeat. Delete
+    the relevant `runs/seed_<n>/` directory to force that seed to rerun.
     """
     t_start = time.perf_counter()
     outdir = Path(cfg.out) if cfg.out else None
@@ -286,12 +308,21 @@ def run_repeated(cfg: ProbeConfig, n_runs: int = 10) -> dict:
     for i in range(n_runs):
         run_seed = cfg.seed + i
         run_out = str(outdir / "runs" / f"seed_{run_seed}") if outdir else None
+        cached_path = Path(run_out) / "results.json" if run_out else None
+        if cached_path and cached_path.exists():
+            cfg._emit(f"--- Run {i + 1}/{n_runs} (seed={run_seed}) --- "
+                      f"found existing {cached_path}, reusing it (resume).")
+            per_run.append(json.loads(cached_path.read_text()))
+            continue
         run_cfg = replace(cfg, seed=run_seed, out=run_out)
         cfg._emit(f"--- Run {i + 1}/{n_runs} (seed={run_cfg.seed}) ---")
+        run_t0 = time.perf_counter()
         try:
             per_run.append(run_probe(run_cfg))
         except (RuntimeError, LLMRequiredError) as exc:
             cfg._emit(f"Run {i + 1} (seed={run_cfg.seed}) failed, excluded from aggregate: {exc}")
+        cfg._emit(f"--- Run {i + 1}/{n_runs} (seed={run_cfg.seed}) took "
+                  f"{time.perf_counter() - run_t0:.1f}s ---")
 
     if not per_run:
         raise RuntimeError(f"All {n_runs} repeated runs failed; nothing to aggregate.")
@@ -318,17 +349,23 @@ def run_repeated(cfg: ProbeConfig, n_runs: int = 10) -> dict:
     # seed-limited corpus (often ~20 rows per strategy) makes for a wide interval
     # on its own; pooling narrows it but does not always escape "wide" (flagged
     # explicitly on each entry, never silently presented as precise).
-    pools: dict[str, dict[str, int]] = {}
-    for r in per_run:
-        for strat, s in r["stress"]["per_strategy"].items():
-            pool = pools.setdefault(strat, {"n": 0, "evaded": 0})
-            pool["n"] += s["n"]
-            pool["evaded"] += round(s["evasion_rate"] * s["n"])
-    per_strategy_wilson = {strat: wilson_ci(pool["evaded"], pool["n"]) for strat, pool in pools.items()}
+    per_strategy_wilson = _pool_per_strategy_wilson(per_run, "per_strategy")
     for strat, w in per_strategy_wilson.items():
         if w["wide"]:
             cfg._emit(f"NOTE: per-strategy evasion CI for '{strat}' is wide (n={w['n']} pooled "
                       f"observations, 95% CI [{w['ci95_low']:.2f}, {w['ci95_high']:.2f}]).")
+
+    # Same pooling restricted to genuinely LLM-sourced rows (source == "llm"),
+    # excluding rules and rules_fallback rows entirely. This is the pure-LLM
+    # result --require-llm was meant to guarantee by aborting on any fallback —
+    # computed here instead so a run can actually finish rather than gambling an
+    # entire overnight --n-runs on zero schema errors across hundreds of calls
+    # (see adversary._mutate_llm's schema-error retry, and REVIEW.md's
+    # require-llm-at-scale finding). Empty for the 'rules' backend, since no row
+    # is ever tagged source == "llm" there.
+    per_strategy_wilson_llm_only = (
+        _pool_per_strategy_wilson(per_run, "per_strategy_llm_only") if cfg.backend == "llm" else {}
+    )
 
     result = {
         "version": __version__,
@@ -342,6 +379,7 @@ def run_repeated(cfg: ProbeConfig, n_runs: int = 10) -> dict:
         "aggregate_metrics": aggregate_metrics,
         "paired_significance_clean_vs_adversarial": significance,
         "per_strategy_wilson_ci": per_strategy_wilson,
+        "per_strategy_wilson_ci_llm_only": per_strategy_wilson_llm_only,
         "per_run_summary": [
             {
                 "seed": r["seed"],
