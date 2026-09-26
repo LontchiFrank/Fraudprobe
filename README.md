@@ -27,7 +27,8 @@ slipped through and which trick was the weak spot.**
 ```
 
 > ⚠️ **Defensive tool.** fraudprobe exists so teams can find and fix these weaknesses
-> *before* attackers exploit them. It runs entirely offline on synthetic data.
+> *before* attackers exploit them. It runs entirely offline, and its zero-setup demo
+> mode never touches real financial data.
 
 ## Why this matters
 
@@ -38,43 +39,288 @@ evasion is a *plausible* transaction, not an arithmetic impossibility. And becau
 attacker is a free local model, the threat it measures is one a non-expert could
 actually mount today.
 
-## Install
+## Contents
+
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Opening the project](#opening-the-project)
+- [How the pipeline works](#how-the-pipeline-works)
+- [Using the CLI](#using-the-cli)
+- [Using the web dashboard](#using-the-web-dashboard)
+- [What gets written to disk](#what-gets-written-to-disk)
+- [Test YOUR own classifier](#test-your-own-classifier)
+- [Using fraudprobe as a library](#using-fraudprobe-as-a-library)
+- [Methodological rigor](#methodological-rigor)
+- [Research context](#research-context) · [License](#license)
+
+## Requirements
+
+- **Python 3.10–3.13.** (3.14 works for everything *except* the SHAP explanations —
+  see the note below.)
+- **macOS/Linux/Windows**, CPU only — no GPU is used or required anywhere in the tool.
+- **Optional, only if you want them:**
+  - [Ollama](https://ollama.com) running locally, with a model pulled (e.g.
+    `ollama pull llama3`) — only needed for `--backend llm`. Everything else (the
+    default `rules` backend, the dashboard, real-data runs) works without it.
+  - The real [PaySim dataset](https://www.kaggle.com/datasets/ealaxi/paysim1) CSV —
+    only needed if you want to test against real transaction data instead of the
+    built-in synthetic demo data.
+
+> **Note on SHAP / Python 3.14.** SHAP (the "why did it evade" feature attribution)
+> depends on `numba`, which lags the newest CPython. If you're on 3.14, install the
+> `explain` extra under a 3.10–3.13 interpreter instead; the rest of fraudprobe runs
+> fine on 3.14 without it (the dashboard just omits the SHAP panel, and `--no-explain`
+> skips it on the CLI).
+
+## Installation
+
+fraudprobe isn't published on PyPI yet, so install it straight from a clone:
 
 ```bash
-pip install fraudprobe            # core: scikit-learn + the web dashboard (Flask)
-pip install "fraudprobe[full]"    # + XGBoost, SMOTE, matplotlib
-pip install "fraudprobe[explain]" # + SHAP evasion explanations (needs Python <3.14)
-pip install "fraudprobe[llm]"     # + Ollama LLM backend
+# 1. Get the code
+git clone https://github.com/LontchiFrank/Fraudprobe.git
+cd Fraudprobe
+
+# 2. Create and activate a virtual environment (recommended)
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+
+# 3. Install fraudprobe and its dependencies
+pip install -e .                   # core only: scikit-learn + the web dashboard (Flask)
+pip install -e ".[full]"           # + XGBoost, SMOTE (imbalanced-learn), matplotlib figures
+pip install -e ".[explain]"        # + SHAP evasion explanations (needs Python <3.14)
+pip install -e ".[llm]"            # + the Ollama client, for the LLM backend
 ```
 
-> **Note on SHAP / Python 3.14.** SHAP depends on `numba`, which lags the newest
-> CPython. If you're on 3.14, install the `explain` extra under a 3.10–3.13
-> interpreter; the rest of fraudprobe runs fine on 3.14 without it (the dashboard
-> just omits the SHAP panel).
-
-## Quickstart
+For the full experience (every classifier type, every figure, SHAP, and the LLM
+backend), install all four extras together:
 
 ```bash
-# Zero setup — synthetic data, no downloads, no GPU:
+pip install -e ".[full,explain,llm]"
+```
+
+`-e` (editable install) means the `fraudprobe` command and `import fraudprobe` both
+run directly against your checked-out copy of the code — useful if you're going to
+read or modify it, and harmless if you're not.
+
+**XGBoost on macOS** needs the OpenMP runtime, which isn't bundled by default:
+
+```bash
+brew install libomp
+```
+
+(If you skip this, everything still works — `--model-type auto`/`rf`/`gbdt` don't
+need it, and fraudprobe falls back to Random Forest if XGBoost fails to import.)
+
+Confirm the install:
+
+```bash
+fraudprobe --version
+```
+
+## Opening the project
+
+There are two ways to "open" fraudprobe: as a **command-line tool** (scriptable,
+reproducible, what the reportable/research runs use) or as a **web dashboard**
+(interactive, point-and-click, best for exploring a first result).
+
+### Option A — the CLI, zero setup
+
+```bash
+fraudprobe run --demo
+```
+
+This trains a classifier on built-in synthetic data, attacks it, and prints the
+report shown at the top of this file straight to your terminal — no data download,
+no LLM, no GPU. It also writes its artefacts to `./fraudprobe_out/` (see
+[What gets written to disk](#what-gets-written-to-disk)).
+
+### Option B — the web dashboard
+
+```bash
+fraudprobe serve
+```
+
+Then open **http://127.0.0.1:5000** in your browser. You'll land on a form (see
+[Using the web dashboard](#using-the-web-dashboard) below for what every field does)
+— pick a model and backend, press **Run probe**, and watch the report render live.
+
+> **Port already in use?** On macOS, port 5000 is often held by the AirPlay Receiver
+> (System Settings → General → AirDrop & Handoff). Run `fraudprobe serve --port 5050`
+> instead and open `http://127.0.0.1:5050`.
+
+## How the pipeline works
+
+Every run — CLI or dashboard — goes through the same four stages:
+
+1. **Baseline** — trains (or loads) a fraud classifier (XGBoost, Random Forest, or
+   Gradient Boosting) and measures clean-conditions performance: F1, PR-AUC, recall
+   on held-out fraud.
+2. **Seed selection** — pulls the frauds the model catches with ≥95% confidence from
+   the held-out set. These are the "obvious" frauds — the ones you'd assume are
+   safely caught.
+3. **Adversary** — mutates each seed fraud so it moves the *same amount of money* but
+   looks less suspicious, using one or more strategies:
+   | Strategy | What it does |
+   |---|---|
+   | `amount_split` | Breaks one large transfer into several smaller ones that sum to the same total (classic "structuring"). |
+   | `temporal_dispersion` | Shifts the transaction to a less suspicious hour. |
+   | `balance_camouflage` | Leaves a small residual balance instead of draining the account to exactly zero — an account drained to `0` is one of the strongest fraud signals in this data. |
+
+   Two **backends** generate these mutations: `rules` (deterministic Python, instant)
+   or `llm` (a local model — llama3 by default, via Ollama — does the same job in
+   natural language; slower, and every output still has to pass an
+   economic-validity check before it's accepted, exactly like the rules backend's
+   output does).
+4. **Stress test** — rescores the mutated corpus with the *same* baseline model and
+   compares detection: clean vs. adversarial recall, the point-drop, and which
+   strategy evaded most.
+5. **Explain (SHAP, optional)** — for each feature, how much it pushed the model
+   toward "fraud" on the original catches vs. the mutated versions. The biggest drops
+   are the levers the attacker pulled to look legitimate.
+
+## Using the CLI
+
+```
+fraudprobe run [options]      # baseline -> attack -> stress-test -> explain
+fraudprobe serve [options]    # launch the web dashboard
+fraudprobe --version
+```
+
+### `run` — data & baseline
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--demo` | on unless `--data` is given | Use the built-in synthetic PaySim-shaped data. |
+| `--demo-rows N` | `60000` | Row count for `--demo`. |
+| `--demo-fraud-rate F` | `0.00129` | Fraud prevalence for `--demo`, matching real PaySim's observed rate. |
+| `--data PATH` | — | Path to a real PaySim-shaped CSV (see [PaySim on Kaggle](https://www.kaggle.com/datasets/ealaxi/paysim1)). |
+| `--sample-legit N` | all rows | With `--data`: keep every fraud row plus a stratified sample of `N` legitimate rows, instead of all ~6.36M — much faster to iterate on. |
+| `--model-type {auto,xgboost,rf,gbdt}` | `auto` | Classifier architecture to train. |
+| `--no-tune` | tuning **on** | Skip the stratified 5-fold grid-search hyperparameter search (faster, less rigorous). |
+| `--model PATH` | — | Test *your own* fitted classifier instead of training one — see [Test YOUR own classifier](#test-your-own-classifier). |
+| `--save-model PATH` | — | Save the trained baseline model to this path. |
+| `--seed N` | `42` | Random seed, for reproducibility. |
+
+### `run` — the adversary
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--backend {rules,llm}` | `rules` | How mutations are generated. |
+| `--llm-model NAME` | `llama3` | Which Ollama model to use with `--backend llm`. |
+| `--require-llm` | off | Abort instead of silently falling back to rules on any LLM failure. |
+| `--strategies [...]` | all three | Restrict to specific mutation strategies. |
+| `--max-seeds N` | `500` | Cap on how many caught frauds get attacked (bounds LLM wall-clock time). |
+| `--validation {strict,lenient}` | `strict` | `strict` also requires balances to arithmetically reconcile; `lenient` only checks signs and sufficient funds. |
+| `--min-value-retention F` | `0.90` | Reject a mutation group that abandons more than `1-F` of the original money — an "evasion" that gives most of the money away isn't one. |
+
+### `run` — comparing and scaling up
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--compare` | off | Attack the *same* trained model + seed frauds with **both** backends and report a statistical (paired) comparison. |
+| `--n-runs N` | `1` | Repeat the whole pipeline across `N` distinct seeds and report means, 95% confidence intervals, and significance tests. Use `10` for citable, reportable results. |
+
+### `run` — output
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--out DIR` | `fraudprobe_out` | Where artefacts are written. Pass an empty value or omit results-affecting flags to skip disk writes when used as a library. |
+| `--no-explain` | explanation **on** | Skip the SHAP evasion attribution (useful if SHAP isn't installed, or for speed). |
+| `--figures` | off | Also write 300dpi PNG+PDF charts, CSV tables, and a full reproducibility manifest — see [What gets written to disk](#what-gets-written-to-disk). |
+
+### `serve`
+
+| Flag | Default |
+|---|---|
+| `--host` | `127.0.0.1` |
+| `--port` | `5000` |
+
+### Example commands
+
+```bash
+# Zero-setup demo:
 fraudprobe run --demo
 
-# Web dashboard (run probes and see the report in your browser):
-fraudprobe serve            # then open http://127.0.0.1:5000
+# Real run against PaySim, XGBoost, all report-ready artefacts:
+fraudprobe run --data paysim.csv --model-type xgboost --figures
 
-# Real run against the PaySim dataset:
-fraudprobe run --data paysim.csv --model-type xgboost
-
-# Attack with a local LLM (llama3 via Ollama) instead of deterministic rules:
+# Attack with a local LLM instead of deterministic rules:
 fraudprobe run --demo --backend llm --llm-model llama3 --max-seeds 20
+
+# Rules vs. LLM, head to head, on the same model and seed frauds:
+fraudprobe run --demo --compare --max-seeds 30
+
+# 10 repeated runs with confidence intervals, for a citable result:
+fraudprobe run --data paysim.csv --model-type xgboost --n-runs 10 --figures
 ```
 
-## Web dashboard
+## Using the web dashboard
 
-`fraudprobe serve` launches a Flask dashboard that runs the full pipeline on demand
-and renders the resilience report: the baseline-vs-adversarial headline tiles, the
-weakness ranking, concrete evading transactions, and — when SHAP is installed — the
-**evasion levers**: which transaction features the attacker neutralised to push the
-fraud score below the model's threshold.
+`fraudprobe serve` renders one page with two halves: a **controls panel** on the
+left and a **results panel** on the right. It also has its own built-in "How this
+works ▾" panel (top right) with the same pipeline/strategy explanation as this
+README, plus a guide to reading the charts — worth opening on your first visit.
+
+**Controls panel** (left):
+
+| Field | What it controls |
+|---|---|
+| Baseline model | Which classifier architecture to train (`auto`, `xgboost`, `rf`, `gbdt`). |
+| Adversary backend | `rules` (instant) or `llm` (local Ollama model). |
+| LLM model | Which Ollama model to use, when the backend is `llm`. |
+| Compare rules vs LLM side-by-side | Trains one model, attacks it with *both* backends, and renders the two reports side by side plus a head-to-head verdict. |
+| Mutation strategies | Which of the three strategies to include (all checked by default). |
+| Synthetic rows | Size of the demo dataset generated for this run. |
+| Max seed frauds | Caps how many caught frauds get attacked — keep this low (10–30) for the `llm` backend, since each mutation is a real model call that takes seconds. |
+| Explain evasion with SHAP | Toggle the SHAP feature-attribution panel. |
+| **Run probe** button | Starts the run; disabled while one is in progress. |
+
+**Results panel** (right), populated once a run finishes:
+
+- **Activity** — a live log streamed from the run (data loading, training, per-strategy
+  generation progress, LLM call latency if applicable).
+- **Headline tiles** — Baseline F1, Clean detection, Adversarial detection, and
+  Detection drop-off (the percentage-point gap — the number that matters most).
+- **Weakness ranking** — a bar per strategy, worst (most-evaded) first.
+- **SHAP evasion levers** — for each feature, a blue bar (its fraud-pushing signal on
+  the original catch) next to an orange bar (the same feature after mutation). A
+  feature whose orange bar collapses toward zero is a signal the attacker
+  successfully neutralised.
+- **Sample evading transactions** — concrete rows with the model's real fraud score,
+  so "44% evasion" becomes an actual transaction the model was confident was safe.
+- **Head-to-head strip** (compare mode only) — states which backend evaded more and
+  by how much. With very few seed frauds this is noisy — use 20–30+ before trusting
+  the verdict.
+
+The dashboard always uses synthetic demo data and skips hyperparameter tuning (it's
+built for fast interactive exploration, not citable numbers) — for a real-data,
+tuned, statistically-repeated run, use the CLI's `--data`/`--n-runs`/`--figures`.
+
+## What gets written to disk
+
+Every CLI run with `--out` set (the default, `fraudprobe_out/`) writes:
+
+| File | Contents |
+|---|---|
+| `adversarial_corpus.csv` | Every mutated transaction generated, tagged with its strategy and `source` (`rules`, `llm`, or `rules_fallback`). |
+| `report.txt` | The same human-readable report printed to the terminal. |
+| `results.json` | Everything, structured: baseline metrics, stress-test results, per-strategy evasion, value retention, LLM success/fallback rates, SHAP attribution, warnings. |
+
+With `--n-runs N > 1`, you additionally get `results_aggregate.json` (means, 95% CIs,
+significance tests, per-strategy Wilson intervals across all `N` runs) at the top
+level, and each individual run's own three files above under `runs/seed_<n>/`.
+
+With `--figures`, you additionally get:
+
+| Path | Contents |
+|---|---|
+| `figures/*.png` + `*.pdf` | PR/ROC curves, confusion matrices, per-strategy evasion with confidence intervals, the threshold sweep, and (if SHAP is installed) the evasion-levers and SHAP summary charts — 300dpi PNG and vector PDF for every chart. |
+| `results_tables/*.csv` | Every reportable table as its own CSV. |
+| `MANIFEST.json` | Package/Python/OS/CPU/RAM, the Ollama model in use, git commit (+ whether the tree was dirty), seed(s), wall-clock timing, and the full CLI invocation — everything needed to say what exactly produced a given `results.json`. |
+
+`--compare` writes `adversarial_corpus_<backend>.csv` per backend plus
+`results.json` with both variants and the paired statistical comparison.
 
 ## Test YOUR own classifier
 
@@ -82,9 +328,9 @@ This is the point of the tool. Wrap any fitted model that exposes `predict_proba
 and fraudprobe will attack it:
 
 ```python
-from fraudprobe import ScoredModel, train_baseline, make_demo_data
+from fraudprobe import ScoredModel
 
-# ... you have your own fitted fraud model `clf` ...
+# ... you have your own fitted fraud model `clf` and know which columns it expects ...
 ScoredModel(estimator=clf, feature_columns=my_features).save("my_model.joblib")
 ```
 
@@ -94,27 +340,30 @@ fraudprobe run --data paysim.csv --model my_model.joblib
 
 Out comes a resilience report telling you your model's blind spots.
 
-## How it works
+## Using fraudprobe as a library
 
-Three phases, mirroring the research design behind it:
+Every CLI/dashboard feature is a plain Python function underneath — see
+[examples/quickstart.py](examples/quickstart.py) for a minimal end-to-end script:
 
-1. **Baseline** — trains (or loads) a fraud classifier and measures clean performance.
-2. **Adversary** — takes high-confidence caught frauds and mutates them with three
-   strategies (`amount_split`, `temporal_dispersion`, `balance_camouflage`), using
-   either deterministic rules (default) or a local LLM (`--backend llm`).
-3. **Stress test** — replays the corpus, measures the detection drop-off, and ranks
-   which strategy evaded most.
-4. **Explain** — uses SHAP to attribute the drop-off to individual features, so you
-   see *which* signals the attacker neutralised (skip with `--no-explain`).
+```bash
+python examples/quickstart.py
+```
 
-Every run writes `adversarial_corpus.csv`, `results.json` (now including the SHAP
-attribution and sample evasions), and `report.txt` with a fixed seed for full
-reproducibility.
+```python
+from fraudprobe import generate_adversarial_corpus, make_demo_data, stress_test, train_baseline
+
+df = make_demo_data(n_rows=40_000, seed=7)
+model, clean_test, baseline = train_baseline(df, model_type="auto", seed=7)
+clean_fraud = clean_test[clean_test["isFraud"] == 1]
+caught = clean_fraud[model.score_rows(clean_fraud) >= 0.95].head(300)
+corpus, adv_report = generate_adversarial_corpus(caught, seed=7)
+stress = stress_test(model, clean_test, corpus)
+```
 
 ## Methodological rigor
 
-fraudprobe is being hardened against a validity review (see `TASKS.md`) so every
-number in a report is measured, not assumed. So far:
+fraudprobe was hardened against a validity review (see `TASKS.md` and `Review.md`)
+so every number in a report is measured, not assumed:
 
 - **LLM provenance** — every mutation is tagged `source=llm`, `source=rules_fallback`,
   or `source=rules`, and the corpus/`results.json` report `llm_success_rate` and a
@@ -171,37 +420,34 @@ number in a report is measured, not assumed. So far:
   sample is small, never silently presented as precise). When `--out` is set, each
   individual run's artefacts (corpus, report, `results.json`, and — with
   `--figures` — its own figures/tables/manifest, including SHAP) land under
-  `out/runs/seed_<n>/` so any one run can be inspected on its own.
+  `out/runs/seed_<n>/` so any one run can be inspected on its own, and a crashed
+  overnight run only loses its in-progress seed (each seed's result is cached and
+  reused on restart).
 - **Rules vs. LLM at scale** — `--compare` attacks the *same* trained model and
   *identical* seed frauds with both backends and reports a paired comparison:
   mean evasion per backend, the difference with a 95% CI, and a significance test
   — isolating what the LLM specifically contributes over a heuristic. LLM calls
   run ~8-25s each depending on load; progress and an ETA are logged periodically,
   and total/mean/min/max call latency land in `results.json`.
-- **Transaction velocity / destination behaviour** — `FEATURE_COLUMNS` now
-  includes `txn_velocity_orig` (backward-looking rolling count of same-`nameOrig`
+- **Transaction velocity / destination behaviour** — `FEATURE_COLUMNS` includes
+  `txn_velocity_orig` (backward-looking rolling count of same-`nameOrig`
   transactions within a 24-step window) and `dest_txn_count` (total transactions
   received by `nameDest`), computed strictly from whatever frame `engineer_features`
   is given — never joined against an external history table, so it stays a pure,
   reapply-to-mutated-rows-unchanged function (see its docstring for the full design
   rationale). Concrete consequence: scored against the adversarial corpus alone
-  (not the full clean population), `amount_split`'s `AMOUNT_SPLIT_PARTS` sibling
-  rows genuinely earn a velocity count > 1 — a real structuring signal — while
-  single-row strategies see 1 regardless. On `--demo` synthetic data both features
-  are degenerate (every row gets an independently random account ID, so the clean
-  population never has velocity > 1 and the features carry no training signal) —
-  flagged automatically as a fixture-dependency warning in every `--demo` run,
-  same treatment as `temporal_dispersion`'s existing warning. Real PaySim data does
-  have repeat account IDs; any evasion-lever ranking involving these two features
-  must be re-measured there before citing it.
+  (not the full clean population), `amount_split`'s sibling rows genuinely earn a
+  velocity count > 1 — a real structuring signal — while single-row strategies see
+  1 regardless. On `--demo` synthetic data both features are degenerate (every row
+  gets an independently random account ID, so the clean population never has
+  velocity > 1 and the features carry no training signal) — flagged automatically
+  as a fixture-dependency warning in every `--demo` run. Real PaySim data does have
+  repeat account IDs; any evasion-lever ranking involving these two features must
+  be re-measured there before citing it.
 - **Report-ready artefacts** — `--figures` writes 300 dpi PNG + vector PDF to
-  `out/figures/` (PR/ROC curves, confusion matrices, per-strategy evasion with
-  Wilson CIs, the threshold sweep, SHAP summary, and evasion levers), CSV tables
-  to `out/results_tables/`, and `out/MANIFEST.json` (package/Python/OS/CPU/RAM,
-  Ollama model, git commit + dirty flag (with diff stat when dirty), seed(s), wall-clock, full CLI
-  invocation) — for single runs, `--compare`, and `--n-runs` alike, so the exact
-  runs cited in a report all produce the same artefacts, generated rather than
-  screenshotted.
+  `out/figures/`, CSV tables to `out/results_tables/`, and `out/MANIFEST.json` — for
+  single runs, `--compare`, and `--n-runs` alike, so the exact runs cited in a
+  report all produce the same artefacts, generated rather than screenshotted.
 
 ## Research context
 
